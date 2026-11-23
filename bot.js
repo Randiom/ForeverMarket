@@ -1,10 +1,10 @@
 const { updateMessage } = require('./message');
 const { screenCandidates } = require('./history');
 const { parsePriceTable, limitedCraft, balancedPicks, priceMaterials } = require('./market');
-const { rateLimitedFetch } = require('./rate-limit');
+const { createApiClient } = require('./api-client');
 const API = 'https://api.ahledger.com';
 const MARKET = process.env.AHLEDGER_MARKET || 'forever.pvp.horde.eu';
-const INTERVAL_MS = 15 * 60 * 1000;
+const INTERVAL_MS = 60 * 1000;
 const PROFESSIONS = ['Alchemy', 'Blacksmithing', 'Cooking', 'Enchanting', 'Engineering', 'First Aid', 'Herbalism', 'Leatherworking', 'Mining', 'Skinning', 'Tailoring'];
 
 function copper(value) {
@@ -107,7 +107,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = []) {
     flags: 32768,
     allowed_mentions: { parse: [] },
     components: [
-      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Refreshes every 15 min` },
+      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Checks every minute; source scans may be older` },
       section('Buy & resell', dealRows, false, 0x53ad91),
       section('Craft & sell', craftRows, true, 0x8e9be0),
       ...(watch.length ? [{ type: 17, accent_color: 0x8394a5, components: [
@@ -126,14 +126,12 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = []) {
   return payload;
 }
 
-async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '' } = {}) {
+async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '', apiClient } = {}) {
   if (!/^forever\.(normal|pvp|rp|rppvp)\.(alliance|horde)\.(us|eu|cn|kr)$/.test(market)) throw new Error('Invalid AHLEDGER_MARKET');
   if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(webhook || '')) throw new Error('Set DISCORD_WEBHOOK_URL to a Discord webhook URL');
   apiKey = apiKey.trim();
   if (apiKey && !/^ahlk_[\w-]+$/.test(apiKey)) throw new Error('AHLEDGER_API_KEY has an invalid format');
-  const apiFetch = rateLimitedFetch((url, options = {}) => fetcher(url, {
-    ...options, headers: { ...options.headers, ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-  }), { limit: apiKey ? 280 : 28 });
+  const apiFetch = apiClient || createApiClient(fetcher, { apiKey });
   // The unfiltered crafting response stops at 500 rows; each profession fits below that cap.
   const [deals, ...craftFeeds] = await Promise.all([
     getPriceTable(market, apiFetch),
@@ -178,10 +176,15 @@ if (require.main === module) {
   if (process.argv.includes('--once')) run().then(() => console.log('Updated market board')).catch(error => { console.error(error.message); process.exitCode = 1; });
   else {
     let busy = false;
+    let apiClient;
     const tick = async () => {
-      if (busy) return;
+      if (busy) { console.log('Previous refresh still running; skipping overlapping minute tick'); return; }
       busy = true;
-      try { await run(); console.log('Updated market board'); }
+      try {
+        apiClient ||= createApiClient(fetch, { apiKey: process.env.AHLEDGER_API_KEY || '' });
+        await run({ apiClient });
+        console.log('Updated market board');
+      }
       catch (error) { console.error(error.message); }
       finally { busy = false; }
     };
