@@ -40,10 +40,18 @@ Run one scheduler. **Disable the GitHub Actions workflow when hosting on Bot-Hos
 
 ## Opportunity selection
 
-Auction deals need a 25% discount against a historical reference, at least one estimated sale per day, and at least one gold estimated net profit per unit. Net profit is 95% of AHledger's reference median less the cheapest listing. Ranking uses profit multiplied by estimated turnover.
+The AHledger deals feed is a candidate list, not a buy signal. Each refresh checks the top ten deal candidates and six craft candidates against item history before selecting up to three of each. The request budget is at most 29 API calls per refresh, including icons. This bounded shortlist can miss opportunities outside those candidates.
 
-Crafts need priced reagents, at least one estimated result sale per day, at most seven days to clear existing listings, and at least one gold net margin. Ranking uses AHledger's estimated daily profit potential. Crafting data is fetched by profession to avoid the unfiltered API's 500-row cap. Item icons come from AHledger's tooltip endpoint, which supplies Blizzard-hosted images.
+Candidates must have recent item prices within two hours of the market snapshot. The history check requires at least 12 distinct hourly observations in **each** of the last three 24-hour windows, four in each of the last two six-hour windows, and an observation within two hours. Duplicate and invalid samples do not count. Missing history or API failures exclude the candidate; there is no fallback to the weekly median.
 
-Prices remain copper internally. Displayed amounts are floored to two decimal gold values. Estimates include the 5% house cut and exclude deposits; market-wide sales rates do not guarantee your own sales or a quick sale. Scans older than six hours or inconsistent feed timestamps are rejected, leaving the prior board and its visible scan timestamp intact.
+Reject an item when its median minimum-buyout price falls more than 10% day over day, more than 15% compared with the oldest of the three days, more than 5% across the last two six-hour windows, or when the latest six-hour floor is more than 10% below the latest daily floor. Reject volatility when the 90th percentile exceeds 1.5 times the 10th percentile of either minimum buyouts or medians over three days. These are conservative screening rules, not a statistically calibrated forecast.
+
+Resale targets use the **lowest** of the lower quartile of listing floors over 24 hours, the lower quartile over 72 hours, and 95% of the current median. The original historical reference can only lower that target. Buy cost uses the higher of the candidate price and the latest item minimum. Profit is recalculated after the 5% cut. This prevents a weekly spike from setting a rebound target.
+
+Craft targets also cannot exceed the current minimum buyout or the recipe feed's output price. Margin is recalculated using the guaranteed minimum yield and reagent cost; it does not rely on maximum proc yield. Crafting cards display the profession and required skill (for example, Leatherworking 225) from the recipe record, or explicitly show that skill is unknown.
+
+Both types need at least one gold net margin, 15% ROI, five estimated market-wide sales per day and no more than two days of listed supply. Recipes with unpriced reagents are excluded. Craft data is fetched by profession to avoid the unfiltered API's 500-row cap. Each card shows the daily change in median listing floor and the number of hourly observations supporting its checks.
+
+Prices remain copper internally and display values are floored to two decimal gold values. History records **asking prices, not executed trade prices**. Passing a stability screen does not establish that prices will rise, that your listing will sell, or that a trade is profitable after deposits and repeated relisting. The API's sales/day estimate covers the whole market. Scans older than six hours or inconsistent feed timestamps leave the existing board untouched with its prior scan time visible.
 
 Recipe reference: [WoW Forever recipes on Wowhead](https://www.wowhead.com/forever/items/recipes). Calculations use AHledger's current recipe and price data; the bot does not scrape Wowhead. Data credit: [AHledger API](https://ahledger.com/developers). Intended for free personal or community use under its API terms.

@@ -1,4 +1,5 @@
 const { updateMessage } = require('./message');
+const { screenCandidates } = require('./history');
 const API = 'https://api.ahledger.com';
 const MARKET = process.env.AHLEDGER_MARKET || 'forever.pvp.horde.eu';
 const INTERVAL_MS = 15 * 60 * 1000;
@@ -34,8 +35,10 @@ function itemBlock(row, icons, crafting = false) {
   const roi = cost > 0 ? ` · ${Math.floor(profit / cost * 100)}% ROI` : '';
   const url = item.url.split('?')[0].replace(/[()]/g, c => c === '(' ? '%28' : '%29');
   const name = safe(item.name.slice(0, 65));
-  const details = crafting ? `Mats ${gold(cost)} · ${safe(row.recipe.profession)}` : `Buy ${gold(cost)} → sell ${gold(row.referenceMedian)}`;
-  const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**~+${gold(profit)}/${crafting ? 'craft' : 'unit'}**${roi}\n${details} · ~${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })}/day sold` };
+  const requirement = crafting ? `${safe(row.recipe.profession)} ${Number.isInteger(row.recipe.skillRequired) ? row.recipe.skillRequired : '(skill unknown)'}` : '';
+  const details = crafting ? `Mats ${gold(cost)} · Requires ${requirement}` : `Buy ${gold(cost)} → target ${gold(row.referenceMedian)}`;
+  const evidence = row.evidence ? `\n-# 24h floor ${row.evidence.dailyChange >= 0 ? '+' : ''}${Math.round(row.evidence.dailyChange * 100)}% vs prior day · ${row.evidence.samples} hourly samples/3d` : '';
+  const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**~+${gold(profit)}/${crafting ? 'craft' : 'unit'}**${roi}\n${details} · ~${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })}/day sold${evidence}` };
   const icon = icons[item.id];
   if (!icon || !/^https:\/\/(render\.worldofwarcraft\.com|wow\.zamimg\.com)\//.test(icon)) return text;
   return { type: 9, components: [text], accessory: { type: 11, media: { url: icon }, description: item.name.slice(0, 100) } };
@@ -49,7 +52,7 @@ function rankDeals(data) {
       row.discount >= 0.25 && row.basis !== 'scan' && row.quantity > 0;
   }).map(row => ({ ...row, profit: Math.floor(row.referenceMedian * 0.95) - row.minBuyout }))
     .sort((a, b) => b.profit * Math.min(b.salesPerDay, b.quantity) - a.profit * Math.min(a.salesPerDay, a.quantity))
-    .slice(0, 8);
+    .slice(0, 10);
 }
 
 function rankCrafts(data) {
@@ -78,7 +81,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}) {
         ...(i ? [{ type: 14, divider: true, spacing: 1 }] : []),
         itemBlock(row, icons, crafting),
       ]),
-      ...(!rows.length ? [{ type: 10, content: 'No opportunities meet the profit and sales filters in this scan.' }] : []),
+      ...(!rows.length ? [{ type: 10, content: 'No opportunities pass recent-history, stability, profit and turnover checks.' }] : []),
     ],
   });
   return {
@@ -88,7 +91,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}) {
       { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Refreshes every 15 min` },
       section('Buy & resell', deals.slice(0, 3), false, 0x53ad91),
       section('Craft & sell', crafts.slice(0, 3), true, 0x8e9be0),
-      { type: 10, content: `-# Estimates after 5% AH cut, before deposits. Sales/day is market-wide, not your guaranteed sales. Confirm live listings.\n[Prices from AHledger](https://ahledger.com) · [All deals](https://ahledger.com/deals?market=${market.replaceAll('.', '/')}) · [All crafts](https://ahledger.com/crafting?market=${market.replaceAll('.', '/')})` },
+      { type: 10, content: `-# Targets use recent listing floors, not predicted rebounds. Estimates after 5% AH cut, before deposits. Sales/day is market-wide, not guaranteed. Confirm live listings.\n[Prices from AHledger](https://ahledger.com) · [All deals](https://ahledger.com/deals?market=${market.replaceAll('.', '/')}) · [All crafts](https://ahledger.com/crafting?market=${market.replaceAll('.', '/')})` },
     ],
   };
 }
@@ -103,8 +106,14 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   ]);
   if (deals.market !== market || deals.marketStatus !== 'scanned' || craftFeeds.some(feed => feed.market !== market || feed.marketStatus !== 'scanned')) throw new Error('AHledger has no scan for the selected market');
   if (!deals.pricesAsOf || craftFeeds.some(feed => feed.pricesAsOf !== deals.pricesAsOf)) throw new Error('AHledger deal and craft scans differ; retry next run');
-  const rankedDeals = rankDeals(deals).slice(0, 3);
-  const rankedCrafts = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) }).slice(0, 3);
+  const screened = await screenCandidates(
+    rankDeals(deals),
+    rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) }).slice(0, 6),
+    id => getJson(`/v1/prices/${market}/${id}?range=7d`, fetcher), deals.pricesAsOf,
+  );
+  console.log('History screening:', JSON.stringify(screened.rejected));
+  const rankedDeals = screened.deals.slice(0, 3);
+  const rankedCrafts = screened.crafts.slice(0, 3);
   const ids = [...new Set([...rankedDeals.map(row => row.item.id), ...rankedCrafts.map(row => row.result.id)])].filter(Number.isInteger);
   let icons = {};
   if (ids.length) {
