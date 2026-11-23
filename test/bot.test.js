@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { rankDeals, rankCrafts, makePayload, run } = require('../bot');
+const { rankDeals, rankCrafts, makePayload, run, craftingProfessions } = require('../bot');
 const { updateMessage } = require('../message');
 
 const webhook = 'https://discord.com/api/webhooks/123/token';
@@ -116,24 +116,64 @@ test('corrupt state fails safely without sending another message', async t => {
 
 test('fetches prices and icons, then updates the persisted board', async t => {
   const stateFile = await state(t);
+  const craftingUrls = [];
   const fetcher = async (url, options) => {
     if (url.startsWith('https://api.ahledger.com/')) assert.equal(options.headers.Authorization, 'Bearer ahlk_test_only');
     else assert.equal(options.headers.Authorization, undefined);
     const common = { market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: now };
     if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(now) / 1000}|1\n1:100000:50000:3:100000:100000:90000:110000:500`);
-    if (url.includes('/crafting/')) return response({ ...common, recipes: url.includes('profession=Alchemy') ? [craft] : [] });
+    if (url.includes('/crafting/')) {
+      craftingUrls.push(url);
+      return response({ ...common, recipes: [craft, { ...craft, recipe: { ...craft.recipe, profession: 'Alchemy' }, result: { ...item, id: 999 } }] });
+    }
     if (url.includes('/prices/')) return response({
       item, latest: { minBuyout: 50000, median: 120000, observedAt: now },
       series: Array.from({ length: 72 }, (_, hour) => ({ t: new Date(Date.parse(now) - hour * 3600000).toISOString(), min: 100000, median: 120000, quantity: 10 })),
     });
-    if (url.includes('/tooltip/')) return response({ market: { slug: 'forever/pvp/horde/eu' }, items: [{ id: 1, icon: 'https://render.worldofwarcraft.com/icon.jpg' }] });
+    if (url.includes('/tooltip/')) {
+      assert.ok(!url.includes('999'));
+      return response({ market: { slug: 'forever/pvp/horde/eu' }, items: [{ id: 1, icon: 'https://render.worldofwarcraft.com/icon.jpg' }] });
+    }
     assert.match(options.method, /POST|PATCH/);
     return response({ id: '456' });
   };
-  const payload = await run({ fetcher, webhook, stateFile, apiKey: 'ahlk_test_only' });
+  const payload = await run({ fetcher, webhook, stateFile, apiKey: 'ahlk_test_only', profession: 'Leatherworking' });
   assert.equal(payload.flags, 32768);
   assert.match(JSON.stringify(payload), /hourly samples/);
+  assert.match(JSON.stringify(payload), /Craft & sell · Leatherworking/);
+  assert.deepEqual(craftingUrls, ['https://api.ahledger.com/v1/crafting/forever.pvp.horde.eu?profession=Leatherworking']);
   assert.equal(JSON.parse(await fs.readFile(stateFile)).id, '456');
+});
+
+test('profession selection defaults to Leatherworking and accepts normalized names or All', () => {
+  assert.deepEqual(craftingProfessions(), ['Leatherworking']);
+  assert.deepEqual(craftingProfessions(' alchemy '), ['Alchemy']);
+  assert.deepEqual(craftingProfessions(''), ['Leatherworking']);
+  assert.equal(craftingProfessions('All').length, 11);
+  assert.throws(() => craftingProfessions('Leatherworkng'), /Invalid CRAFTING_PROFESSION/);
+});
+
+test('custom profession and All fetch only their selected feeds and label the board', async t => {
+  for (const profession of ['Alchemy', 'All']) {
+    const stateFile = await state(t);
+    const urls = [];
+    const fetcher = async url => {
+      if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(now) / 1000}|1\n1:1000:1000:3:1000:1000:900:1100:500`);
+      if (url.includes('/crafting/')) {
+        urls.push(url);
+        return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: now, recipes: [] });
+      }
+      return response({ id: '456' });
+    };
+    const payload = await run({ fetcher, webhook, stateFile, profession });
+    assert.equal(urls.length, profession === 'All' ? 11 : 1);
+    if (profession === 'Alchemy') assert.match(urls[0], /profession=Alchemy$/);
+    assert.match(JSON.stringify(payload), new RegExp(`Craft & sell · ${profession === 'All' ? 'All professions' : profession}`));
+  }
+});
+
+test('invalid professions fail before fetching or publishing', async t => {
+  await assert.rejects(run({ webhook, stateFile: await state(t), profession: 'Wrong', fetcher: () => assert.fail('must not fetch') }), /Invalid CRAFTING_PROFESSION/);
 });
 
 test('stale scans never overwrite the last good board', async t => {
