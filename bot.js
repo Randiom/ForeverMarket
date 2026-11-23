@@ -7,6 +7,14 @@ const MARKET = process.env.AHLEDGER_MARKET || 'forever.pvp.horde.eu';
 const INTERVAL_MS = 60 * 1000;
 const PROFESSIONS = ['Alchemy', 'Blacksmithing', 'Cooking', 'Enchanting', 'Engineering', 'First Aid', 'Herbalism', 'Leatherworking', 'Mining', 'Skinning', 'Tailoring'];
 
+function craftingProfessions(value = 'Leatherworking') {
+  const name = value.trim() || 'Leatherworking';
+  if (name.toLowerCase() === 'all') return [...PROFESSIONS];
+  const match = PROFESSIONS.find(profession => profession.toLowerCase() === name.toLowerCase());
+  if (!match) throw new Error(`Invalid CRAFTING_PROFESSION. Choose ${PROFESSIONS.join(', ')} or All`);
+  return [match];
+}
+
 function copper(value) {
   const n = Math.round(value);
   const gold = Math.floor(n / 10000);
@@ -87,7 +95,7 @@ async function getPriceTable(market, fetcher) {
   return parsePriceTable(await response.text(), market);
 }
 
-function makePayload(deals, crafts, asOf, market, icons = {}, watch = []) {
+function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profession = 'Leatherworking') {
   const timestamp = new Date(asOf);
   if (!Number.isFinite(timestamp.getTime())) throw new Error('AHledger returned no valid scan time');
   if (Date.now() - timestamp.getTime() > 6 * 60 * 60 * 1000) throw new Error(`AHledger scan is stale: ${asOf}`);
@@ -109,12 +117,12 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = []) {
     components: [
       { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Checks every minute; source scans may be older` },
       section('Buy & resell', dealRows, false, 0x53ad91),
-      section('Craft & sell', craftRows, true, 0x8e9be0),
+      section(`Craft & sell · ${profession}`, craftRows, true, 0x8e9be0),
       ...(watch.length ? [{ type: 17, accent_color: 0x8394a5, components: [
         { type: 10, content: '### Liquid market watch\n-# Current quotes only · not validated buy recommendations' },
         ...watch.slice(0, 2).map(item => ({ type: 10, content: `**${safe(item.name.slice(0, 65))}**\nMin ${gold(item.minBuyout)} · median ${gold(item.median)} · market ~${Math.floor(item.salesPerDay).toLocaleString('en-US')} units/day` })),
       ] }] : []),
-      { type: 10, content: `-# Costs include a 2% material buffer; targets allow 2% slippage and 5% AH cut. Examples exclude deposits, recipe/tool costs and do not promise sales. Known cooldown crafts are excluded. Verify recipe restrictions in game.\n[Prices from AHledger](https://ahledger.com) · [All deals](https://ahledger.com/deals?market=${market.replaceAll('.', '/')}) · [All crafts](https://ahledger.com/crafting?market=${market.replaceAll('.', '/')})` },
+      { type: 10, content: `-# Costs include a 2% material buffer; targets allow 2% slippage and 5% AH cut. Examples exclude deposits, recipe/tool costs and do not promise sales. Known cooldown crafts are excluded. Verify recipe restrictions in game.\n[Prices from AHledger](https://ahledger.com) · [All deals](https://ahledger.com/deals?market=${market.replaceAll('.', '/')}) · [View recipes](https://ahledger.com/crafting?market=${market.replaceAll('.', '/')}${profession === 'All professions' ? '' : `&profession=${encodeURIComponent(profession)}`})` },
     ],
   });
   const textSize = node => (node.content?.length || 0) + (node.components || []).reduce((n, child) => n + textSize(child), 0);
@@ -126,16 +134,17 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = []) {
   return payload;
 }
 
-async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '', apiClient } = {}) {
+async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '', apiClient, profession = process.env.CRAFTING_PROFESSION || 'Leatherworking' } = {}) {
   if (!/^forever\.(normal|pvp|rp|rppvp)\.(alliance|horde)\.(us|eu|cn|kr)$/.test(market)) throw new Error('Invalid AHLEDGER_MARKET');
   if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(webhook || '')) throw new Error('Set DISCORD_WEBHOOK_URL to a Discord webhook URL');
   apiKey = apiKey.trim();
   if (apiKey && !/^ahlk_[\w-]+$/.test(apiKey)) throw new Error('AHLEDGER_API_KEY has an invalid format');
   const apiFetch = apiClient || createApiClient(fetcher, { apiKey });
+  const selectedProfessions = craftingProfessions(profession);
   // The unfiltered crafting response stops at 500 rows; each profession fits below that cap.
   const [deals, ...craftFeeds] = await Promise.all([
     getPriceTable(market, apiFetch),
-    ...PROFESSIONS.map(profession => getJson(`/v1/crafting/${market}?profession=${encodeURIComponent(profession)}`, apiFetch)),
+    ...selectedProfessions.map(profession => getJson(`/v1/crafting/${market}?profession=${encodeURIComponent(profession)}`, apiFetch)),
   ]);
   if (deals.market !== market || deals.marketStatus !== 'scanned' || craftFeeds.some(feed => feed.market !== market || feed.marketStatus !== 'scanned')) throw new Error('AHledger has no scan for the selected market');
   const asOf = craftFeeds[0]?.pricesAsOf;
@@ -143,7 +152,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   if (!asOf || craftFeeds.some(feed => feed.pricesAsOf !== asOf) || Math.abs(Date.parse(deals.tableGeneratedAt) - Date.parse(asOf)) > 7200000) throw new Error('AHledger table and recipe feeds are out of sync; retry next run');
   const candidateLimit = apiKey ? 100 : 40;
   const dealCandidates = rankDeals(deals, candidateLimit);
-  const craftCandidates = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) }, candidateLimit);
+  const craftCandidates = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []).filter(row => selectedProfessions.includes(row.recipe?.profession)) }, candidateLimit);
   const watchCandidates = balancedPicks(deals.deals.filter(row => row.salesPerDay >= 100 && row.minBuyout <= 50000), 4);
   const quoteIds = [...new Set([...dealCandidates.map(row => row.item.id), ...craftCandidates.flatMap(row => [row.result.id, ...(row.reagents || []).map(reagent => reagent.id)]), ...watchCandidates.map(row => row.item.id)])].filter(Number.isInteger);
   let quotes = {};
@@ -167,7 +176,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   const icons = Object.fromEntries(Object.entries(quotes).map(([id, item]) => [id, item.icon]));
   const pickedIds = new Set([...rankedDeals.map(row => row.item.id), ...rankedCrafts.map(row => row.result.id)]);
   const watch = watchCandidates.map(row => quotes[row.item.id]).filter(item => item?.name && !pickedIds.has(item.id) && item.minBuyout > 0 && item.median > 0 && item.salesPerDay >= 100 && Number.isFinite(Date.parse(item.observedAt)) && Math.abs(Date.parse(item.observedAt) - Date.parse(asOf)) <= 7200000).slice(0, 2);
-  const payload = makePayload(rankedDeals, rankedCrafts, asOf, market, icons, watch);
+  const payload = makePayload(rankedDeals, rankedCrafts, asOf, market, icons, watch, selectedProfessions.length === 1 ? selectedProfessions[0] : 'All professions');
   await updateMessage({ webhook, payload, fetcher, stateFile, messageId });
   return payload;
 }
@@ -193,4 +202,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { copper, rankDeals, rankCrafts, makePayload, run };
+module.exports = { copper, rankDeals, rankCrafts, makePayload, run, craftingProfessions };
