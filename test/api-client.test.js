@@ -91,3 +91,21 @@ test('a stalled response body is retried too, even without cache headers', async
   assert.equal((await (await client(base)).json()).complete, true);
   assert.equal(calls, 2);
 });
+
+test('an aborted refresh cannot start another API request', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const client = createApiClient(async () => { calls++; return new Response('{}'); });
+  await assert.rejects(client(base, { signal: controller.signal }), /refresh time budget/);
+  assert.equal(calls, 0);
+});
+
+test('the history scheduler can identify fresh cache entries without reading expired data', async () => {
+  let clock = 0;
+  const client = createApiClient(async () => new Response('{}', { headers: { 'Cache-Control': 'max-age=1' } }), { now: () => clock });
+  await client(base);
+  assert.equal(client.hasFresh?.(base), true);
+  clock = 1000;
+  assert.equal(client.hasFresh?.(base), false);
+});

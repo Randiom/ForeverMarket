@@ -102,3 +102,81 @@ test('history fetch failures exclude candidates and never fall back to weekly ta
   assert.equal(result.deals.length, 0);
   assert.equal(result.rejected['history unavailable'], 1);
 });
+
+test('one stalled history request does not hold later fast items behind its batch', async () => {
+  let release;
+  const stalled = new Promise(resolve => { release = resolve; });
+  const started = [];
+  const rows = Array.from({ length: 6 }, (_, i) => ({ ...deal, item: { id: i + 1, name: `Item ${i + 1}` } }));
+  const pending = screenCandidates(rows, [], async id => {
+    started.push(id);
+    if (id === 1) await stalled;
+    return { ...history(), item: { id } };
+  }, asOf);
+  try {
+    await new Promise(setImmediate);
+    assert.ok(started.includes(5), 'the fifth item must start while the first is still waiting');
+  } finally {
+    release();
+    await pending;
+  }
+});
+
+test('an expired refresh stops scheduling histories and reports partial coverage', async () => {
+  const controller = new AbortController();
+  const afterDeadline = [];
+  const rows = Array.from({ length: 12 }, (_, i) => ({ ...deal, item: { id: i + 1 } }));
+  const pending = screenCandidates(rows, [], async id => {
+    if (controller.signal.aborted) { afterDeadline.push(id); throw Error('expired'); }
+    await new Promise(resolve => controller.signal.addEventListener('abort', resolve, { once: true }));
+    throw Error('expired');
+  }, asOf, { signal: controller.signal });
+  await new Promise(setImmediate);
+  controller.abort();
+  const result = await pending;
+  assert.deepEqual(afterDeadline, []);
+  assert.equal(result.coverage.total, 12);
+  assert.equal(result.coverage.partial, true);
+  assert.equal(result.coverage.received, 0);
+});
+
+test('crafting candidates get an early turn alongside the auction queue', async () => {
+  const controller = new AbortController();
+  const started = [];
+  const rows = Array.from({ length: 10 }, (_, i) => ({ ...deal, item: { id: i + 1 } }));
+  const craft = { result: { id: 100, qtyMin: 1 }, resultPrice: 100000, cost: 50000, resultSalesPerDay: 50, resultListed: 10 };
+  await screenCandidates(rows, [craft], async id => {
+    started.push(id);
+    if (started.length === 2) controller.abort();
+    return { ...history(), item: { id } };
+  }, asOf, { signal: controller.signal });
+  assert.ok(started.includes(100), 'the profession must not wait behind every auction item');
+});
+
+test('a partial scan resumes from later candidates on the next refresh', async () => {
+  const controller = new AbortController();
+  const rows = Array.from({ length: 8 }, (_, i) => ({ ...deal, item: { id: i + 1 } }));
+  let count = 0;
+  const first = await screenCandidates(rows, [], async id => {
+    if (++count === 2) controller.abort();
+    return { ...history(), item: { id } };
+  }, asOf, { signal: controller.signal });
+  const nextStarted = [];
+  await screenCandidates(rows, [], async id => { nextStarted.push(id); return { ...history(), item: { id } }; }, asOf, { cursor: first.coverage.nextCursor });
+  assert.equal(nextStarted[0], 3);
+});
+
+test('fresh cached histories remain visible when uncached requests consume the budget', async () => {
+  const controller = new AbortController();
+  const rows = Array.from({ length: 6 }, (_, i) => ({ ...deal, item: { id: i + 1 } }));
+  const pending = screenCandidates(rows, [], async id => {
+    if (id === 6) return { ...history(), item: { id } };
+    if (!controller.signal.aborted) await new Promise(resolve => controller.signal.addEventListener('abort', resolve, { once: true }));
+    throw Error('budget expired');
+  }, asOf, { signal: controller.signal, isCached: id => id === 6 });
+  await new Promise(setImmediate);
+  controller.abort();
+  const result = await pending;
+  assert.ok(result.deals.some(row => row.item.id === 6));
+  assert.equal(result.coverage.partial, true);
+});
