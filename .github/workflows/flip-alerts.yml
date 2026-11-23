@@ -17,8 +17,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Restore board message ID
+        uses: actions/cache/restore@v4
+        with:
+          path: .state/discord-message.json
+          key: forevermarket-board-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: forevermarket-board-v1-
       - run: npm test
       - run: npm run once
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MESSAGE_ID: ${{ vars.DISCORD_MESSAGE_ID }}
           AHLEDGER_MARKET: forever.pvp.horde.eu
+      - name: Save board message ID
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state/discord-message.json
+          key: forevermarket-board-v1-${{ github.run_id }}-${{ github.run_attempt }}
