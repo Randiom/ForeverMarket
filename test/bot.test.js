@@ -48,7 +48,7 @@ test('compact board has six picks, real icons, safe mentions, and fits Component
   assert.equal(payload.content, undefined);
   assert.ok(all.length <= 40);
   assert.ok(text.length <= 4000);
-  assert.match(text, /4.50g\/unit/);
+  assert.match(text, /\+4.50g\*\* net \/ unit/);
   assert.match(text, /@\u200beveryone/);
   assert.match(text, /EU · PvP · Horde/);
   assert.match(text, /Requires Leatherworking 225/);
@@ -57,7 +57,7 @@ test('compact board has six picks, real icons, safe mentions, and fits Component
 
 test('empty boards and unavailable icons remain readable', () => {
   const empty = makePayload([], [], now, 'forever.pvp.horde.eu');
-  assert.match(JSON.stringify(empty), /No current-price spreads pass/);
+  assert.match(JSON.stringify(empty), /No qualifying spreads right now/);
   const noIcons = makePayload([{ ...deal, profit: 45000 }], [], now, 'forever.pvp.horde.eu', { 1: 'https://untrusted.example/icon.jpg' });
   assert.equal(noIcons.components.flatMap(components).filter(c => c.type === 11).length, 0);
 });
@@ -65,7 +65,7 @@ test('empty boards and unavailable icons remain readable', () => {
 test('market watch is explicitly separate from validated recommendations', () => {
   const payload = makePayload([], [], now, 'forever.pvp.horde.eu', {}, [{ name: 'Linen Cloth', minBuyout: 22, median: 30, salesPerDay: 500 }]);
   const text = payload.components.flatMap(components).filter(c => c.type === 10).map(c => c.content).join('\n');
-  assert.match(text, /not validated buy recommendations/);
+  assert.match(text, /not buy recommendations/);
   assert.match(text, /Min 22c · median 30c/);
   assert.doesNotMatch(text, /% ROI/);
 });
@@ -141,7 +141,7 @@ test('fetches prices and icons, then updates the persisted board', async t => {
   assert.equal(payload.flags, 32768);
   assert.match(JSON.stringify(payload), /Current prices only/);
   assert.doesNotMatch(JSON.stringify(payload), /hourly samples|histories checked/);
-  assert.match(JSON.stringify(payload), /Craft & sell · Leatherworking/);
+  assert.match(JSON.stringify(payload), /Craft & sell\\n-# Leatherworking/);
   assert.deepEqual(craftingUrls, ['https://api.ahledger.com/v1/crafting/forever.pvp.horde.eu?profession=Leatherworking']);
   assert.equal(JSON.parse(await fs.readFile(stateFile)).id, '456');
 });
@@ -169,7 +169,7 @@ test('custom profession and All fetch only their selected feeds and label the bo
     const payload = await run({ fetcher, webhook, stateFile, profession });
     assert.equal(urls.length, profession === 'All' ? 11 : 1);
     if (profession === 'Alchemy') assert.match(urls[0], /profession=Alchemy$/);
-    assert.match(JSON.stringify(payload), new RegExp(`Craft & sell · ${profession === 'All' ? 'All professions' : profession}`));
+    assert.match(JSON.stringify(payload), new RegExp(`Craft & sell\\\\n-# ${profession === 'All' ? 'All professions' : profession}`));
   }
 });
 
@@ -243,7 +243,7 @@ test('current-price refresh never requests history or bulk candidate quotes', as
   const text = JSON.stringify(payload);
   assert.match(text, /Current prices only/);
   assert.match(text, /Current item/);
-  assert.match(text, /1.59g\/craft/);
+  assert.match(text, /1.59g\*\* net \/ craft/);
   assert.match(text, /Requires Leatherworking 225/);
 });
 
@@ -257,5 +257,5 @@ test('unavailable item pictures do not discard current-price crafting findings',
   };
   const payload = await run({ fetcher, webhook, stateFile: await state(t) });
   assert.match(JSON.stringify(payload), /115c|1s 15c/);
-  assert.match(JSON.stringify(payload), /1 practical picks/);
+  assert.match(JSON.stringify(payload), /Craft & sell/);
 });

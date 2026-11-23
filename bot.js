@@ -30,9 +30,13 @@ function safe(text) {
 function gold(value) {
   if (value < 10000) {
     const n = Math.floor(value);
-    return n < 100 ? `${n}c` : `${Math.floor(n / 100)}s ${n % 100}c`;
+    return n < 100 ? `${n}c` : `${Math.floor(n / 100)}s${n % 100 ? ` ${n % 100}c` : ''}`;
   }
   return `${(Math.floor(value / 100) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}g`;
+}
+
+function volume(value) {
+  return value.toLocaleString('en-US', { notation: 'compact', maximumFractionDigits: value >= 1000 ? 1 : 0 }).toLowerCase();
 }
 
 function marketLabel(market) {
@@ -45,16 +49,15 @@ function itemBlock(row, icons, crafting = false) {
   const profit = crafting ? row.margin : row.profit;
   const cost = crafting ? row.cost : row.minBuyout;
   const sales = crafting ? row.resultSalesPerDay : row.salesPerDay;
-  const label = sales >= 100 ? 'High volume' : cost <= 50000 ? 'Low entry cost' : 'Steady margin';
   const url = item.url.split('?')[0].replace(/[()]/g, c => c === '(' ? '%28' : '%29');
   const name = safe(item.name.slice(0, 65));
   const requirement = crafting ? `${safe(row.recipe.profession)} ${Number.isInteger(row.recipe.skillRequired) ? row.recipe.skillRequired : '(skill unknown)'}` : '';
   const yieldMin = crafting ? (row.result.qtyMin || 1) : 1;
-  const details = crafting ? `Inputs ${gold(cost)} → ${yieldMin} × ${gold(row.resultPrice || 0)} target\nRequires ${requirement} · Source: ${safe((row.recipe.acquisition || 'unknown').slice(0, 30))}` : `Buy ${gold(cost)} → target ${gold(row.referenceMedian)}`;
-  const count = Math.max(1, Math.floor(Math.min(10, sales * 0.05 / yieldMin, 100000 / cost,
-    ...(crafting ? (row.reagents || []).map(reagent => Number.isFinite(reagent.available) ? reagent.available / reagent.qty : 1) : [row.quantity]))));
-  const example = `Example ${count} ${crafting ? 'crafts' : 'units'}: ${gold(cost * count)} cost · ~${gold(profit * count)} net`;
-  const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**~+${gold(profit)}/${crafting ? 'craft' : 'unit'}** · ${label}\n${details}\n${example}\nMarket ~${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })} units/day` };
+  const details = crafting
+    ? `Mats ${gold(cost)} → Sell ${yieldMin > 1 ? `${yieldMin}×` : ''}${gold(row.resultPrice || 0)}\nRequires ${requirement}`
+    : `Buy ${gold(cost)} → Sell ${gold(row.referenceMedian)}`;
+  const source = crafting ? ` · ${safe((row.recipe.acquisition || 'source unknown').slice(0, 30))}` : '';
+  const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**+${gold(profit)}** net / ${crafting ? 'craft' : 'unit'}\n${details}\n-# Market ~${volume(sales)}/day${source}` };
   const icon = icons[item.id];
   if (!icon || !/^https:\/\/(render\.worldofwarcraft\.com|wow\.zamimg\.com)\//.test(icon)) return text;
   return { type: 9, components: [text], accessory: { type: 11, media: { url: icon }, description: item.name.slice(0, 100) } };
@@ -100,12 +103,12 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
   const section = (title, rows, crafting, color) => ({
     type: 17, accent_color: color,
     components: [
-      { type: 10, content: `### ${title} · ${rows.length} practical picks` },
+      { type: 10, content: `### ${title}` },
       ...rows.flatMap((row, i) => [
         ...(i ? [{ type: 14, divider: true, spacing: 1 }] : []),
         itemBlock(row, icons, crafting),
       ]),
-      ...(!rows.length ? [{ type: 10, content: 'No current-price spreads pass profit and turnover checks.' }] : []),
+      ...(!rows.length ? [{ type: 10, content: 'No qualifying spreads right now. Check the [current market](https://ahledger.com).' }] : []),
     ],
   });
   const dealRows = deals.slice(0, 3), craftRows = crafts.slice(0, 3);
@@ -113,14 +116,14 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
     flags: 32768,
     allowed_mentions: { parse: [] },
     components: [
-      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Checks every minute; source scans may be older\n-# Current prices only · asking-price spreads, not guaranteed sales` },
+      { type: 10, content: `## ForeverMarket\n${marketLabel(market)}\n-# Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R> · Updated <t:${Math.floor(Date.now() / 1000)}:t>` },
       section('Buy & resell', dealRows, false, 0x53ad91),
-      section(`Craft & sell · ${profession}`, craftRows, true, 0x8e9be0),
+      section(`Craft & sell\n-# ${profession}`, craftRows, true, 0x8e9be0),
       ...(watch.length ? [{ type: 17, accent_color: 0x8394a5, components: [
-        { type: 10, content: '### Liquid market watch\n-# Current quotes only · not validated buy recommendations' },
-        ...watch.slice(0, 2).map(item => ({ type: 10, content: `**${safe(item.name.slice(0, 65))}**\nMin ${gold(item.minBuyout)} · median ${gold(item.median)} · market ~${Math.floor(item.salesPerDay).toLocaleString('en-US')} units/day` })),
+        { type: 10, content: '### Market watch\n-# Prices only · not buy recommendations' },
+        ...watch.slice(0, 2).map(item => ({ type: 10, content: `**${safe(item.name.slice(0, 65))}**\nMin ${gold(item.minBuyout)} · median ${gold(item.median)}\n-# Market ~${volume(item.salesPerDay)}/day` })),
       ] }] : []),
-      { type: 10, content: `-# Costs include a 2% material buffer; targets allow 2% slippage and 5% AH cut. Examples exclude deposits, recipe/tool costs and do not promise sales. Known cooldown crafts are excluded. Verify recipe restrictions in game.\n[Prices from AHledger](https://ahledger.com) · [All deals](https://ahledger.com/deals?market=${market.replaceAll('.', '/')}) · [View recipes](https://ahledger.com/crafting?market=${market.replaceAll('.', '/')}${profession === 'All professions' ? '' : `&profession=${encodeURIComponent(profession)}`})` },
+      { type: 10, content: `-# Current prices only · Refresh every minute.\n-# Net estimates include 5% AH cut, 2% slippage and 2% material buffer. Excludes deposits and recipe/tool costs. Verify live listings and recipe restrictions.\n[Prices from AHledger](https://ahledger.com) · [All deals](https://ahledger.com/deals?market=${market.replaceAll('.', '/')}) · [View recipes](https://ahledger.com/crafting?market=${market.replaceAll('.', '/')}${profession === 'All professions' ? '' : `&profession=${encodeURIComponent(profession)}`})` },
     ],
   });
   const textSize = node => (node.content?.length || 0) + (node.components || []).reduce((n, child) => n + textSize(child), 0);
