@@ -1,8 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parsePriceTable, limitedCraft, balancedPicks, priceMaterials } = require('../market');
+const { parsePriceTable, limitedCraft, balancedPicks, priceMaterials, currentCraft } = require('../market');
 const { rankDeals, rankCrafts } = require('../bot');
-const { qualifyCraft, qualifyDeal } = require('../history');
 const now = '2026-11-23T12:00:00.000Z';
 const recipe = { spellId: 1, name: 'Bolt of Cloth', profession: 'Tailoring', skillRequired: 70, acquisition: 'trainer' };
 const item = { id: 1, name: 'Cloth', url: 'https://ahledger.com/items/1-cloth' };
@@ -28,10 +27,7 @@ test('known cooldown crafts cannot appear as repeatable opportunities', () => {
 
 test('a small-margin, liquid trainer craft is no longer discarded by the 1g floor', () => {
   assert.equal(rankCrafts({ recipes: [craft] }).length, 1);
-  const assessment = { ok: true, target: 1000, latest: { minBuyout: 1000 } };
-  const result = qualifyCraft(craft, assessment);
-  assert.equal(result.ok, true);
-  assert.equal(result.row.margin, 131);
+
 });
 
 test('material costs use available current quotes and a 2% buffer, not free materials', () => {
@@ -46,8 +42,7 @@ test('material costs use available current quotes and a 2% buffer, not free mate
 
 test('large apparent ROI disappears when actual input costs are checked', () => {
   const priced = priceMaterials(craft, { 2: { median: 600, minBuyout: 590, quantity: 20, observedAt: now } }, now);
-  const result = qualifyCraft(priced, { ok: true, target: 1000, latest: { minBuyout: 1000 } });
-  assert.equal(result.reason, 'insufficient recent margin');
+  assert.equal(rankCrafts({ recipes: [{ ...priced, margin: 931 - priced.cost }] }).length, 0);
 });
 
 test('mixed selection gives volume and low capital picks room before a huge profit item', () => {
@@ -59,13 +54,28 @@ test('mixed selection gives volume and low capital picks room before a huge prof
   assert.deepEqual(balancedPicks(rows, 2, true).map(row => row.result.id), [1, 2]);
 });
 
-test('unusually large margins are flagged for verification, not silently capped', () => {
-  const assessment = { ok: true, target: 10000, latest: { minBuyout: 100 } };
-  const result = qualifyDeal({ minBuyout: 100, referenceMedian: 10000, salesPerDay: 100, quantity: 20 }, assessment);
-  assert.equal(result.reason, 'unusually large margin; verify listings');
+test('current craft targets use current competition, minimum yield, one AH cut and buffered inputs', () => {
+  const quotes = {
+    1: { minBuyout: 1000, median: 1200, quantity: 50, salesPerDay: 500, observedAt: now },
+    2: { minBuyout: 400, median: 400, quantity: 100, observedAt: now },
+  };
+  const result = currentCraft({ ...craft, resultPrice: 100000, reagents: [{ id: 2, qty: 2, price: 100000 }] }, quotes, now);
+  assert.equal(result.cost, 816);
+  assert.equal(result.resultPrice, 980);
+  assert.equal(result.margin, 115);
+  assert.equal(currentCraft(craft, { 2: quotes[2] }, now), null);
+  assert.equal(currentCraft({ ...craft, result: { ...item, qtyMin: 0 } }, quotes, now), null);
+  assert.equal(rankCrafts({ recipes: [{ ...result, margin: result.cost * 2 }] }).length, 0);
 });
 
-test('the history shortlist includes forty distinct outputs instead of only eight', () => {
+test('table ignores both low and high historical medians for current price calculations', () => {
+  for (const oldPrice of [1, 999999]) {
+    const data = parsePriceTable(`AHL1|forever/pvp/horde/eu|1795435200|1\n1:1000:800:100:${oldPrice}:${oldPrice}:1:999999:5000`, 'forever.pvp.horde.eu');
+    assert.equal(data.deals[0].referenceMedian, 1000);
+  }
+});
+
+test('craft selection can include forty distinct outputs', () => {
   const rows = Array.from({ length: 45 }, (_, i) => ({ ...craft, result: { ...craft.result, id: i + 1 }, resultSalesPerDay: 1000 - i }));
   const candidates = rankCrafts({ recipes: rows });
   assert.equal(candidates.length, 40);
@@ -75,4 +85,10 @@ test('the history shortlist includes forty distinct outputs instead of only eigh
 test('authenticated scanning can select one hundred distinct crafted outputs', () => {
   const rows = Array.from({ length: 125 }, (_, i) => ({ ...craft, result: { ...craft.result, id: i + 1 }, resultSalesPerDay: 1000 - i }));
   assert.equal(rankCrafts({ recipes: rows }, 100).length, 100);
+});
+
+test('auction profit matches the displayed whole-copper target and applies the AH cut once', () => {
+  const [row] = rankDeals({ deals: [{ item, median: 1003, referenceMedian: 999999, minBuyout: 800, quantity: 20, salesPerDay: 100 }] });
+  assert.equal(row.referenceMedian, 982);
+  assert.equal(row.profit, 132);
 });

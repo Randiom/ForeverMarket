@@ -27,14 +27,14 @@ test('ranking excludes low liquidity and unpriced crafts', () => {
   assert.equal(rankCrafts({ recipes: [craft, { ...craft, unpriced: [1] }] }).length, 1);
 });
 
-test('old reference peaks and slow sellers cannot monopolize the history shortlist', () => {
+test('current medians and turnover determine the auction picks', () => {
   const candidates = rankDeals({ deals: [
     { ...deal, median: 55000, referenceMedian: 10000000 },
-    { ...deal, median: 120000 },
+    { ...deal, median: 100000, referenceMedian: 9999999 },
     { ...deal, salesPerDay: 2 },
   ] });
   assert.equal(candidates.length, 1);
-  assert.equal(candidates[0].referenceMedian, 100000);
+  assert.equal(candidates[0].referenceMedian, 98000);
 });
 
 test('compact board has six picks, real icons, safe mentions, and fits Components V2 limits', () => {
@@ -57,7 +57,7 @@ test('compact board has six picks, real icons, safe mentions, and fits Component
 
 test('empty boards and unavailable icons remain readable', () => {
   const empty = makePayload([], [], now, 'forever.pvp.horde.eu');
-  assert.match(JSON.stringify(empty), /No opportunities pass/);
+  assert.match(JSON.stringify(empty), /No current-price spreads pass/);
   const noIcons = makePayload([{ ...deal, profit: 45000 }], [], now, 'forever.pvp.horde.eu', { 1: 'https://untrusted.example/icon.jpg' });
   assert.equal(noIcons.components.flatMap(components).filter(c => c.type === 11).length, 0);
 });
@@ -139,7 +139,8 @@ test('fetches prices and icons, then updates the persisted board', async t => {
   };
   const payload = await run({ fetcher, webhook, stateFile, apiKey: 'ahlk_test_only', profession: 'Leatherworking' });
   assert.equal(payload.flags, 32768);
-  assert.match(JSON.stringify(payload), /hourly samples/);
+  assert.match(JSON.stringify(payload), /Current prices only/);
+  assert.doesNotMatch(JSON.stringify(payload), /hourly samples|histories checked/);
   assert.match(JSON.stringify(payload), /Craft & sell · Leatherworking/);
   assert.deepEqual(craftingUrls, ['https://api.ahledger.com/v1/crafting/forever.pvp.horde.eu?profession=Leatherworking']);
   assert.equal(JSON.parse(await fs.readFile(stateFile)).id, '456');
@@ -222,34 +223,39 @@ test('a server failure during creation remains pending; a definitive rejection c
   assert.equal(JSON.parse(await fs.readFile(rejected)).id, '789');
 });
 
-test('the refresh publishes completed results without retrying a history after its budget expires', async t => {
-  const { createApiClient } = require('../api-client');
-  const controller = new AbortController();
-  let slowReady;
-  const ready = new Promise(resolve => { slowReady = resolve; });
-  let slowCalls = 0;
-  const fetcher = async url => {
-    if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(now) / 1000}|2\n1:100000:50000:3:100000:100000:90000:110000:500\n2:100000:50000:3:100000:100000:90000:110000:500`);
-    if (url.includes('/crafting/')) return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: now, recipes: [] });
-    if (url.includes('/tooltip/')) return response({ market: { slug: 'forever/pvp/horde/eu' }, items: [] });
-    if (url.includes('/prices/') && url.includes('/2?')) {
-      slowCalls++; slowReady();
-      if (!controller.signal.aborted) await new Promise(resolve => controller.signal.addEventListener('abort', resolve, { once: true }));
-      throw new DOMException('timeout', 'TimeoutError');
+test('current-price refresh never requests history or bulk candidate quotes', async t => {
+  const calls = [];
+  const fetcher = async (url, options) => {
+    calls.push(url);
+    if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(now) / 1000}|2\n1:100000:50000:3:9000000:9000000:90000:110000:500\n2:15000:14000:100:500000:500000:9000:11000:5000`);
+    if (url.includes('/crafting/')) return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: now, recipes: [{ ...craft, result: { ...item, qtyMin: 1 }, resultPrice: 100000, reagents: [{ id: 2, qty: 2, price: 999999 }] }] });
+    if (url.includes('/tooltip/')) {
+      assert.equal(options.signal.aborted, false);
+      return response({ market: { slug: 'forever/pvp/horde/eu' }, items: [{ id: 1, name: 'Current item', icon: 'https://render.worldofwarcraft.com/icon.jpg' }] });
     }
-    if (url.includes('/prices/')) return response({
-      item, latest: { minBuyout: 50000, median: 120000, observedAt: now },
-      series: Array.from({ length: 72 }, (_, hour) => ({ t: new Date(Date.parse(now) - hour * 3600000).toISOString(), min: 100000, median: 120000, quantity: 10 })),
-    });
+    assert.ok(url.includes('discord.com'), `Unexpected API call: ${url}`);
     return response({ id: '456' });
   };
-  const pending = run({ fetcher, webhook, profession: 'Leatherworking', stateFile: await state(t), signal: controller.signal, apiClient: createApiClient(fetcher, { wait: async () => {} }) });
-  await ready;
-  await new Promise(setImmediate);
-  controller.abort();
-  const payload = await pending;
-  assert.equal(slowCalls, 1);
-  assert.match(JSON.stringify(payload), /Partial refresh/);
-  assert.match(JSON.stringify(payload), /1\/2 histories/);
-  assert.match(JSON.stringify(payload), /4.31g\/unit/);
+  const payload = await run({ fetcher, webhook, stateFile: await state(t) });
+  assert.equal(calls.filter(url => url.includes('/prices/')).length, 0);
+  assert.equal(calls.filter(url => url.includes('/tooltip/')).length, 1);
+  assert.ok(new URL(calls.find(url => url.includes('/tooltip/'))).searchParams.get('items').split(',').length <= 8);
+  const text = JSON.stringify(payload);
+  assert.match(text, /Current prices only/);
+  assert.match(text, /Current item/);
+  assert.match(text, /1.59g\/craft/);
+  assert.match(text, /Requires Leatherworking 225/);
+});
+
+test('unavailable item pictures do not discard current-price crafting findings', async t => {
+  const fetcher = async url => {
+    if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(now) / 1000}|2\n1:1000:1000:20:1000:1000:900:1100:500\n2:400:400:100:400:400:300:500:5000`);
+    if (url.includes('/crafting/')) return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: now, recipes: [{ ...craft, result: { ...item, qtyMin: 1 }, resultPrice: 1000, cost: 800, margin: 150, reagents: [{ id: 2, qty: 2, price: 400 }] }] });
+    if (url.includes('/tooltip/')) return response({}, 503);
+    assert.ok(url.includes('discord.com'), 'no history endpoint');
+    return response({ id: '456' });
+  };
+  const payload = await run({ fetcher, webhook, stateFile: await state(t) });
+  assert.match(JSON.stringify(payload), /115c|1s 15c/);
+  assert.match(JSON.stringify(payload), /1 practical picks/);
 });
