@@ -1,10 +1,14 @@
 {
-  "name": "lol-team-bot",
+  "name": "ahledger-flip-bot",
   "version": "1.0.0",
-  "description": "Discord bot: link Riot accounts, split a voice channel into two rank-balanced League of Legends teams",
-  "main": "lolteams.js",
-  "scripts": { "start": "node lolteams.js", "test": "node --test" },
+  "private": true,
+  "description": "WoW Forever auction and crafting flip alerts for Discord",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "once": "node bot.js --once",
+    "test": "node --test"
+  },
   "engines": { "node": ">=20.12" },
-  "license": "MIT",
-  "dependencies": { "discord.js": "^14.19.0" }
+  "license": "MIT"
 }
