@@ -1,3 +1,4 @@
+const { updateMessage } = require('./message');
 const API = 'https://api.ahledger.com';
 const MARKET = process.env.AHLEDGER_MARKET || 'forever.pvp.horde.eu';
 const INTERVAL_MS = 15 * 60 * 1000;
@@ -25,26 +26,19 @@ function marketLabel(market) {
   return `${region.toUpperCase()} · ${{ normal: 'Normal', pvp: 'PvP', rp: 'RP', rppvp: 'RP PvP' }[ruleset]} · ${faction === 'horde' ? 'Horde' : 'Alliance'}`;
 }
 
-function chartLink(item) {
-  // Keep unusually long source URLs from exhausting Discord's embed text budget.
-  const url = item.chartUrl || item.url;
-  return `[View prices](${url.length <= 250 ? url.replace(/[()]/g, c => c === '(' ? '%28' : '%29') : 'https://ahledger.com'})`;
-}
-
-function opportunityField(row, index, crafting = false) {
+function itemBlock(row, icons, crafting = false) {
   const item = crafting ? row.result : row.item;
   const profit = crafting ? row.margin : row.profit;
   const cost = crafting ? row.cost : row.minBuyout;
   const sales = crafting ? row.resultSalesPerDay : row.salesPerDay;
   const roi = cost > 0 ? ` · ${Math.floor(profit / cost * 100)}% ROI` : '';
-  const details = crafting
-    ? `Materials \`${gold(cost)}\` · ${safe(row.recipe.profession)}`
-    : `Buy \`${gold(cost)}\` → target \`${gold(row.referenceMedian)}\``;
-  return {
-    name: `${String(index + 1).padStart(2, '0')} · ${safe(item.name.slice(0, 90))}`,
-    value: `**~+${gold(profit)} net/${crafting ? 'craft' : 'unit'}**${roi}\n${details}\nEst. ${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })} sold/day · ${chartLink(item)}`,
-    inline: false,
-  };
+  const url = item.url.split('?')[0].replace(/[()]/g, c => c === '(' ? '%28' : '%29');
+  const name = safe(item.name.slice(0, 65));
+  const details = crafting ? `Mats ${gold(cost)} · ${safe(row.recipe.profession)}` : `Buy ${gold(cost)} → sell ${gold(row.referenceMedian)}`;
+  const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**~+${gold(profit)}/${crafting ? 'craft' : 'unit'}**${roi}\n${details} · ~${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })}/day sold` };
+  const icon = icons[item.id];
+  if (!icon || !/^https:\/\/(render\.worldofwarcraft\.com|wow\.zamimg\.com)\//.test(icon)) return text;
+  return { type: 9, components: [text], accessory: { type: 11, media: { url: icon }, description: item.name.slice(0, 100) } };
 }
 
 function rankDeals(data) {
@@ -72,46 +66,34 @@ async function getJson(path, fetcher = fetch) {
   return response.json();
 }
 
-function makePayload(deals, crafts, asOf, market) {
+function makePayload(deals, crafts, asOf, market, icons = {}) {
   const timestamp = new Date(asOf);
   if (!Number.isFinite(timestamp.getTime())) throw new Error('AHledger returned no valid scan time');
   if (Date.now() - timestamp.getTime() > 6 * 60 * 60 * 1000) throw new Error(`AHledger scan is stale: ${asOf}`);
-  const scan = `<t:${Math.floor(timestamp.getTime() / 1000)}:R>`;
-  const credit = { text: 'Prices from AHledger · Estimates after 5% AH cut · Excludes deposits' };
-  const payload = {
-    username: 'ForeverMarket',
-    allowed_mentions: { parse: [] },
-    embeds: [
-      {
-        title: 'Auction flips',
-        url: `https://ahledger.com/deals?market=${market.replaceAll('.', '/')}`,
-        description: `**${marketLabel(market)}**\nScan ${scan} · ${deals.length} opportunities\n${deals.length ? 'Ranked by profit × estimated turnover.' : 'No deals meet the profit and sales filters. Check the full market using the title link.'}`,
-        color: 0x53ad91,
-        fields: deals.slice(0, 8).map((row, i) => opportunityField(row, i)),
-        footer: credit,
-      },
-      {
-        title: 'Crafting flips',
-        url: `https://ahledger.com/crafting?market=${market.replaceAll('.', '/')}`,
-        description: `**${marketLabel(market)}**\nScan ${scan} · ${crafts.length} opportunities\n${crafts.length ? 'Ranked by estimated daily profit potential.' : 'No crafts meet the profit and sales filters. Check the full recipe list using the title link.'}`,
-        color: 0x8e9be0,
-        fields: crafts.slice(0, 8).map((row, i) => opportunityField(row, i, true)),
-        footer: credit,
-      },
+  const section = (title, rows, crafting, color) => ({
+    type: 17, accent_color: color,
+    components: [
+      { type: 10, content: `### ${title} · Top ${rows.length}` },
+      ...rows.flatMap((row, i) => [
+        ...(i ? [{ type: 14, divider: true, spacing: 1 }] : []),
+        itemBlock(row, icons, crafting),
+      ]),
+      ...(!rows.length ? [{ type: 10, content: 'No opportunities meet the profit and sales filters in this scan.' }] : []),
     ],
-    content: '[Prices from AHledger](https://ahledger.com) · Confirm live listings before buying.',
+  });
+  return {
+    flags: 32768,
+    allowed_mentions: { parse: [] },
+    components: [
+      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Refreshes every 15 min` },
+      section('Buy & resell', deals.slice(0, 3), false, 0x53ad91),
+      section('Craft & sell', crafts.slice(0, 3), true, 0x8e9be0),
+      { type: 10, content: `-# Estimates after 5% AH cut, before deposits. Sales/day is market-wide, not your guaranteed sales. Confirm live listings.\n[Prices from AHledger](https://ahledger.com) · [All deals](https://ahledger.com/deals?market=${market.replaceAll('.', '/')}) · [All crafts](https://ahledger.com/crafting?market=${market.replaceAll('.', '/')})` },
+    ],
   };
-  // Discord caps text at 6,000 characters across all embeds in one message.
-  const textSize = () => payload.embeds.reduce((total, embed) => total + embed.title.length + embed.description.length + embed.footer.text.length + embed.fields.reduce((sum, field) => sum + field.name.length + field.value.length, 0), 0);
-  while (textSize() > 5900) {
-    const embed = payload.embeds.reduce((a, b) => a.fields.length > b.fields.length ? a : b);
-    embed.fields.pop();
-    embed.description = embed.description.replace(/\d+ opportunities/, `${embed.fields.length} opportunities`);
-  }
-  return payload;
 }
 
-async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET } = {}) {
+async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId } = {}) {
   if (!/^forever\.(normal|pvp|rp|rppvp)\.(alliance|horde)\.(us|eu|cn|kr)$/.test(market)) throw new Error('Invalid AHLEDGER_MARKET');
   if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(webhook || '')) throw new Error('Set DISCORD_WEBHOOK_URL to a Discord webhook URL');
   // The unfiltered crafting response stops at 500 rows; each profession fits below that cap.
@@ -121,16 +103,25 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   ]);
   if (deals.market !== market || deals.marketStatus !== 'scanned' || craftFeeds.some(feed => feed.market !== market || feed.marketStatus !== 'scanned')) throw new Error('AHledger has no scan for the selected market');
   if (!deals.pricesAsOf || craftFeeds.some(feed => feed.pricesAsOf !== deals.pricesAsOf)) throw new Error('AHledger deal and craft scans differ; retry next run');
-  const payload = makePayload(rankDeals(deals), rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) }), deals.pricesAsOf, market);
-  const response = await fetcher(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(20000) });
-  if (!response.ok) throw new Error(`Discord webhook returned HTTP ${response.status}`);
+  const rankedDeals = rankDeals(deals).slice(0, 3);
+  const rankedCrafts = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) }).slice(0, 3);
+  const ids = [...new Set([...rankedDeals.map(row => row.item.id), ...rankedCrafts.map(row => row.result.id)])].filter(Number.isInteger);
+  let icons = {};
+  if (ids.length) {
+    try {
+      const tooltip = await getJson(`/v1/tooltip/${market}?items=${ids.join(',')}`, fetcher);
+      icons = Object.fromEntries((tooltip.items || []).map(item => [item.id, item.icon]));
+    } catch { console.warn('Item icons unavailable; updating with text only'); }
+  }
+  const payload = makePayload(rankedDeals, rankedCrafts, deals.pricesAsOf, market, icons);
+  await updateMessage({ webhook, payload, fetcher, stateFile, messageId });
   return payload;
 }
 
 if (require.main === module) {
-  if (process.argv.includes('--once')) run().then(() => console.log('Posted flip report')).catch(error => { console.error(error.message); process.exitCode = 1; });
+  if (process.argv.includes('--once')) run().then(() => console.log('Updated market board')).catch(error => { console.error(error.message); process.exitCode = 1; });
   else {
-    const tick = () => run().then(() => console.log('Posted flip report')).catch(error => console.error(error.message));
+    const tick = () => run().then(() => console.log('Updated market board')).catch(error => console.error(error.message));
     tick();
     setInterval(tick, INTERVAL_MS);
   }
