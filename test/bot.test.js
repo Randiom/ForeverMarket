@@ -11,7 +11,7 @@ const item = { id: 1, name: 'Test @everyone', url: 'https://ahledger.com/items/1
 const now = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
 const deal = { item, minBuyout: 50000, referenceMedian: 100000, discount: .5, quantity: 3, salesPerDay: 50 };
 const craft = { recipe: { name: 'Test craft', profession: 'Leatherworking', skillRequired: 225 }, result: item, cost: 50000, margin: 20000, profitPerDay: 40000, resultSalesPerDay: 50, resultClearDays: 2, unpriced: [] };
-const response = (data, status = 200) => ({ ok: status < 300, status, json: async () => data, text: async () => data });
+const response = (data, status = 200) => ({ ok: status < 300, status, json: async () => data, text: async () => typeof data === 'string' ? data : JSON.stringify(data) });
 async function state(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'market-test-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -185,4 +185,39 @@ test('stale scans never overwrite the last good board', async t => {
     return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: oldScan, deals: [], recipes: [] });
   };
   await assert.rejects(run({ fetcher, webhook, stateFile }), /stale/);
+});
+
+test('a Discord edit timeout keeps the known message ID and never creates another', async t => {
+  const stateFile = await state(t);
+  await updateMessage({ webhook, stateFile, payload: {}, fetcher: async () => response({ id: '456' }) });
+  const before = await fs.readFile(stateFile, 'utf8');
+  const methods = [];
+  await assert.rejects(updateMessage({ webhook, stateFile, payload: {}, fetcher: async (url, options) => {
+    methods.push(options.method);
+    throw new DOMException('timeout', 'TimeoutError');
+  } }), /Discord PATCH: request timed out/);
+  assert.deepEqual(methods, ['PATCH']);
+  assert.equal(await fs.readFile(stateFile, 'utf8'), before);
+});
+
+test('uncertain creation delivery blocks subsequent posts until the message is adopted', async t => {
+  const stateFile = await state(t);
+  await assert.rejects(updateMessage({ webhook, stateFile, payload: {}, fetcher: async () => { throw new DOMException('timeout', 'TimeoutError'); } }), /Discord POST/);
+  assert.equal(JSON.parse(await fs.readFile(stateFile)).pending, true);
+  await assert.rejects(updateMessage({ webhook, stateFile, payload: {}, fetcher: () => assert.fail('must not post again') }), /uncertain delivery/);
+  await updateMessage({ webhook, stateFile, payload: {}, messageId: '789', fetcher: async (url, options) => {
+    assert.equal(options.method, 'PATCH'); return response({ id: '789' });
+  } });
+  assert.equal(JSON.parse(await fs.readFile(stateFile)).id, '789');
+});
+
+test('a server failure during creation remains pending; a definitive rejection can retry later', async t => {
+  const uncertain = await state(t);
+  await assert.rejects(updateMessage({ webhook, stateFile: uncertain, payload: {}, fetcher: async () => response({}, 503) }), /HTTP 503/);
+  assert.equal(JSON.parse(await fs.readFile(uncertain)).pending, true);
+  const rejected = await state(t);
+  await assert.rejects(updateMessage({ webhook, stateFile: rejected, payload: {}, fetcher: async () => response({}, 400) }), /HTTP 400/);
+  await assert.rejects(fs.access(rejected), { code: 'ENOENT' });
+  await updateMessage({ webhook, stateFile: rejected, payload: {}, fetcher: async () => response({ id: '789' }) });
+  assert.equal(JSON.parse(await fs.readFile(rejected)).id, '789');
 });

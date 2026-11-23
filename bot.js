@@ -83,14 +83,14 @@ function rankCrafts(data, limit = 40) {
   return balancedPicks(candidates, limit, true);
 }
 
-async function getJson(path, fetcher = fetch) {
-  const response = await fetcher(`${API}${path}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+async function getJson(path, fetcher) {
+  const response = await fetcher(`${API}${path}`, { headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error(`AHledger returned HTTP ${response.status} for ${path}`);
   return response.json();
 }
 
 async function getPriceTable(market, fetcher) {
-  const response = await fetcher(`${API}/v1/pricetable/${market}`, { signal: AbortSignal.timeout(20000) });
+  const response = await fetcher(`${API}/v1/pricetable/${market}`);
   if (!response.ok) throw new Error(`AHledger price table returned HTTP ${response.status}`);
   return parsePriceTable(await response.text(), market);
 }
@@ -141,6 +141,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   if (apiKey && !/^ahlk_[\w-]+$/.test(apiKey)) throw new Error('AHLEDGER_API_KEY has an invalid format');
   const apiFetch = apiClient || createApiClient(fetcher, { apiKey });
   const selectedProfessions = craftingProfessions(profession);
+  console.log(`Fetching market table and ${selectedProfessions.join(', ')} recipes`);
   // The unfiltered crafting response stops at 500 rows; each profession fits below that cap.
   const [deals, ...craftFeeds] = await Promise.all([
     getPriceTable(market, apiFetch),
@@ -155,6 +156,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   const craftCandidates = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []).filter(row => selectedProfessions.includes(row.recipe?.profession)) }, candidateLimit);
   const watchCandidates = balancedPicks(deals.deals.filter(row => row.salesPerDay >= 100 && row.minBuyout <= 50000), 4);
   const quoteIds = [...new Set([...dealCandidates.map(row => row.item.id), ...craftCandidates.flatMap(row => [row.result.id, ...(row.reagents || []).map(reagent => reagent.id)]), ...watchCandidates.map(row => row.item.id)])].filter(Number.isInteger);
+  console.log(`Checking current quotes for ${quoteIds.length} items`);
   let quotes = {};
   for (let offset = 0; offset < quoteIds.length; offset += 100) {
     try {
@@ -164,6 +166,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
     } catch { console.warn('A current quote batch is unavailable; skipping crafts that need those inputs'); }
   }
   const pricedCrafts = craftCandidates.map(row => priceMaterials(row, quotes, asOf)).filter(Boolean);
+  console.log(`Checking history for ${dealCandidates.length} auction and ${pricedCrafts.length} crafting candidates`);
   const screened = await screenCandidates(
     dealCandidates,
     pricedCrafts,
@@ -177,6 +180,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   const pickedIds = new Set([...rankedDeals.map(row => row.item.id), ...rankedCrafts.map(row => row.result.id)]);
   const watch = watchCandidates.map(row => quotes[row.item.id]).filter(item => item?.name && !pickedIds.has(item.id) && item.minBuyout > 0 && item.median > 0 && item.salesPerDay >= 100 && Number.isFinite(Date.parse(item.observedAt)) && Math.abs(Date.parse(item.observedAt) - Date.parse(asOf)) <= 7200000).slice(0, 2);
   const payload = makePayload(rankedDeals, rankedCrafts, asOf, market, icons, watch, selectedProfessions.length === 1 ? selectedProfessions[0] : 'All professions');
+  console.log('Updating Discord market board');
   await updateMessage({ webhook, payload, fetcher, stateFile, messageId });
   return payload;
 }
