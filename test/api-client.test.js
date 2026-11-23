@@ -54,3 +54,40 @@ test('Retry-After pauses subsequent requests and credentials cannot leave AHledg
   await assert.rejects(client('https://discord.com/api/webhooks/test'), /Invalid AHledger API destination/);
   assert.equal(calls, 2);
 });
+
+test('a transient timeout retries the same read once with a new signal', async () => {
+  let calls = 0, clock = 0;
+  const signals = [];
+  const client = createApiClient(async (url, options) => {
+    calls++; signals.push(options.signal);
+    if (calls === 1) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    return new Response('{"ok":true}');
+  }, { now: () => clock, wait: async ms => { clock += ms; } });
+  assert.deepEqual(await (await client(`${base}?profession=Leatherworking`)).json(), { ok: true });
+  assert.equal(calls, 2);
+  assert.notEqual(signals[0], signals[1]);
+  assert.equal(clock, 1000);
+});
+
+test('exhausted timeouts identify the endpoint without exposing credentials', async () => {
+  let calls = 0;
+  const client = createApiClient(async () => { calls++; throw new DOMException('sensitive upstream message', 'TimeoutError'); }, { apiKey: 'ahlk_test_only', wait: async () => {} });
+  await assert.rejects(client(`${base}?profession=Leatherworking`), error => {
+    assert.match(error.message, /\/v1\/test\?profession=Leatherworking: timed out after 30 seconds \(2 attempts\)/);
+    assert.ok(!error.message.includes('ahlk_test_only'));
+    assert.ok(!error.message.includes('sensitive'));
+    return true;
+  });
+  assert.equal(calls, 2);
+});
+
+test('a stalled response body is retried too, even without cache headers', async () => {
+  let calls = 0;
+  const client = createApiClient(async () => {
+    calls++;
+    if (calls === 1) return { ok: true, status: 200, text: async () => { throw new DOMException('timeout', 'TimeoutError'); } };
+    return new Response('{"complete":true}');
+  }, { wait: async () => {} });
+  assert.equal((await (await client(base)).json()).complete, true);
+  assert.equal(calls, 2);
+});

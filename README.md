@@ -10,7 +10,7 @@ The first run creates a board. The bot saves its message ID in `.state/discord-m
 
 To reuse a message already sent by this webhook, enable Developer Mode in Discord, copy that message's ID, and set `DISCORD_MESSAGE_ID` before the first run. A saved ID takes precedence on later runs. An old embed message can be converted to the new layout. A webhook can only edit its own messages.
 
-A deleted board is replaced on the next successful scan. Rate limits, permission failures, and temporary Discord errors leave the existing board in place. Corrupt state stops updates rather than posting duplicates. The state file contains a webhook fingerprint and message ID, never the webhook token. A lock prevents concurrent processes sharing a state file from posting twice; after an abrupt crash, remove a leftover `.lock` file only after confirming the bot is stopped.
+A deleted board is replaced on the next successful scan. If a new-message request times out, crashes, or returns a server error after it may have been delivered, the bot preserves a pending marker and stops creating messages. Check the Discord channel, then set `DISCORD_MESSAGE_ID` to the delivered message ID; only remove the state file if no message was delivered. This prevents repeated timeout-driven posts. Rate limits, permission failures, and temporary Discord errors leave the existing board in place. Corrupt state stops updates rather than posting duplicates. The state file contains a webhook fingerprint and message ID, never the webhook token. A lock prevents concurrent processes sharing a state file from posting twice; after an abrupt crash, remove a leftover `.lock` file only after confirming the bot is stopped.
 
 The board uses [Discord Components V2](https://docs.discord.com/developers/components/reference), with thumbnail accessories rather than traditional rich embeds. If icons cannot be fetched, the same board still updates with text. It is a webhook dashboard; interactive pagination or Discord commands would require an application bot.
 
@@ -71,3 +71,7 @@ Prices are copper internally. Cards use gold for larger amounts and silver/coppe
 Recipe reference: [WoW Forever recipes on Wowhead](https://www.wowhead.com/forever/items/recipes). Calculations use AHledger's current recipe and price data; the bot does not scrape Wowhead. Data credit: [AHledger API](https://ahledger.com/developers). Intended for free personal or community use under its API terms.
 
 Supported crafting categories: Alchemy, Blacksmithing, Cooking, Enchanting, Engineering, First Aid, Herbalism, Leatherworking, Mining, Skinning, Tailoring, and All. Values ignore letter case and surrounding spaces; invalid values fail before any API request.
+
+## Request timeouts
+
+AHledger reads have a 30-second deadline and one retry for transient network errors or timeouts, including stalled response bodies. Each retry is counted in the shared rate budget; the second failure names the endpoint and profession in the log without printing credentials. HTTP 429/503 responses retain their Retry-After handling. Discord calls have a 30-second deadline and are not blindly retried. Refresh-stage logs show whether the bot is fetching feeds, checking quotes/history, or updating Discord. A timeout does not itself show that the hosting plan has hit a resource limit.
