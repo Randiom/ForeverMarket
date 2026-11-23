@@ -11,6 +11,38 @@ function history(price = () => 100000) {
 }
 const deal = { item: { id: 1 }, minBuyout: 60000, referenceMedian: 300000, salesPerDay: 10, quantity: 10 };
 
+test('distributed three-hour scans pass with only two days of history', () => {
+  const data = history();
+  data.series = data.series.filter((_, hour) => hour < 48 && hour % 3 === 0);
+  const assessment = assessHistory(data, asOf, 1);
+  assert.equal(assessment.ok, true);
+  assert.equal(assessment.samples, 16);
+  assert.equal(assessment.historyHours, 48);
+  assert.equal(assessment.target, 100000);
+});
+
+test('a missing third day does not suppress an otherwise stable market', () => {
+  const data = history();
+  data.series = data.series.filter((_, hour) => hour < 48 || hour > 65);
+  const assessment = assessHistory(data, asOf, 1);
+  assert.equal(assessment.ok, true);
+  assert.equal(assessment.historyHours, 48);
+});
+
+test('samples clustered in one half of a day still fail coverage', () => {
+  const data = history();
+  data.series = data.series.filter((_, hour) => hour % 24 < 10);
+  assert.equal(assessHistory(data, asOf, 1).reason, 'insufficient recent history');
+});
+
+test('gapped history still rejects declines and spikes', () => {
+  for (const prices of [hour => 100000 + hour * 4000, hour => hour % 6 ? 100000 : 200000]) {
+    const data = history(prices);
+    data.series = data.series.filter((_, hour) => hour < 48 && hour % 3 === 0);
+    assert.equal(assessHistory(data, asOf, 1).ok, false);
+  }
+});
+
 test('old weekly spikes cannot inflate a stable recent resale target', () => {
   const result = assessHistory(history(hour => hour >= 72 ? 1000000 : 100000), asOf, 1);
   assert.equal(result.ok, true);

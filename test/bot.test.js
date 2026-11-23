@@ -10,7 +10,7 @@ const webhook = 'https://discord.com/api/webhooks/123/token';
 const item = { id: 1, name: 'Test @everyone', url: 'https://ahledger.com/items/1-test' };
 const now = new Date().toISOString();
 const deal = { item, minBuyout: 50000, referenceMedian: 100000, discount: .5, quantity: 3, salesPerDay: 10 };
-const craft = { recipe: { name: 'Test craft', profession: 'Leatherworking', skillRequired: 225 }, result: item, cost: 50000, margin: 20000, profitPerDay: 40000, resultSalesPerDay: 2, resultClearDays: 2, unpriced: [] };
+const craft = { recipe: { name: 'Test craft', profession: 'Leatherworking', skillRequired: 225 }, result: item, cost: 50000, margin: 20000, profitPerDay: 40000, resultSalesPerDay: 10, resultClearDays: 2, unpriced: [] };
 const response = (data, status = 200) => ({ ok: status < 300, status, json: async () => data });
 async function state(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'market-test-'));
@@ -25,6 +25,16 @@ function components(node) {
 test('ranking excludes low liquidity and unpriced crafts', () => {
   assert.equal(rankDeals({ deals: [deal, { ...deal, salesPerDay: 0 }] }).length, 1);
   assert.equal(rankCrafts({ recipes: [craft, { ...craft, unpriced: [1] }] }).length, 1);
+});
+
+test('old reference peaks and slow sellers cannot monopolize the history shortlist', () => {
+  const candidates = rankDeals({ deals: [
+    { ...deal, median: 55000, referenceMedian: 10000000 },
+    { ...deal, median: 120000 },
+    { ...deal, salesPerDay: 2 },
+  ] });
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].referenceMedian, 100000);
 });
 
 test('compact board has six picks, real icons, safe mentions, and fits Components V2 limits', () => {
@@ -108,9 +118,10 @@ test('fetches prices and icons, then updates the persisted board', async t => {
 
 test('stale scans never overwrite the last good board', async t => {
   const stateFile = await state(t);
+  const oldScan = new Date(Date.now() - 7 * 3600000).toISOString();
   const fetcher = async url => {
     if (url.includes('discord.com')) assert.fail('must not send stale data');
-    return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: new Date(Date.now() - 7 * 3600000).toISOString(), deals: [], recipes: [] });
+    return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: oldScan, deals: [], recipes: [] });
   };
   await assert.rejects(run({ fetcher, webhook, stateFile }), /stale/);
 });

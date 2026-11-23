@@ -37,7 +37,7 @@ function itemBlock(row, icons, crafting = false) {
   const name = safe(item.name.slice(0, 65));
   const requirement = crafting ? `${safe(row.recipe.profession)} ${Number.isInteger(row.recipe.skillRequired) ? row.recipe.skillRequired : '(skill unknown)'}` : '';
   const details = crafting ? `Mats ${gold(cost)} · Requires ${requirement}` : `Buy ${gold(cost)} → target ${gold(row.referenceMedian)}`;
-  const evidence = row.evidence ? `\n-# 24h floor ${row.evidence.dailyChange >= 0 ? '+' : ''}${Math.round(row.evidence.dailyChange * 100)}% vs prior day · ${row.evidence.samples} hourly samples/3d` : '';
+  const evidence = row.evidence ? `\n-# 24h floor ${row.evidence.dailyChange >= 0 ? '+' : ''}${Math.round(row.evidence.dailyChange * 100)}% vs prior day · ${row.evidence.samples} hourly samples/${(row.evidence.historyHours || 72) / 24}d` : '';
   const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**~+${gold(profit)}/${crafting ? 'craft' : 'unit'}**${roi}\n${details} · ~${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })}/day sold${evidence}` };
   const icon = icons[item.id];
   if (!icon || !/^https:\/\/(render\.worldofwarcraft\.com|wow\.zamimg\.com)\//.test(icon)) return text;
@@ -45,10 +45,13 @@ function itemBlock(row, icons, crafting = false) {
 }
 
 function rankDeals(data) {
-  return (data.deals || []).filter(row => {
+  return (data.deals || []).map(row => ({ ...row,
+    // An old peak must not dominate the limited history-check budget either.
+    referenceMedian: Number.isFinite(row.median) && row.median > 0 ? Math.min(row.referenceMedian, row.median * 0.95) : row.referenceMedian,
+  })).filter(row => {
     const profit = Math.floor(row.referenceMedian * 0.95) - row.minBuyout;
     return row.item?.name && row.item?.url?.startsWith('https://ahledger.com/') &&
-      Number.isFinite(profit) && profit >= 10000 && row.salesPerDay >= 1 &&
+      Number.isFinite(profit) && profit >= 10000 && profit / row.minBuyout >= 0.15 && row.salesPerDay >= 5 && row.quantity / row.salesPerDay <= 2 &&
       row.discount >= 0.25 && row.basis !== 'scan' && row.quantity > 0;
   }).map(row => ({ ...row, profit: Math.floor(row.referenceMedian * 0.95) - row.minBuyout }))
     .sort((a, b) => b.profit * Math.min(b.salesPerDay, b.quantity) - a.profit * Math.min(a.salesPerDay, a.quantity))
@@ -59,7 +62,7 @@ function rankCrafts(data) {
   return (data.recipes || []).filter(row => row.recipe?.name &&
     row.result?.url?.startsWith('https://ahledger.com/') &&
     row.unpriced?.length === 0 && row.margin >= 10000 &&
-    row.resultSalesPerDay >= 1 && row.resultClearDays <= 7)
+    row.margin / row.cost >= 0.15 && row.resultSalesPerDay >= 5 && row.resultClearDays <= 2)
     .sort((a, b) => b.profitPerDay - a.profitPerDay).slice(0, 8);
 }
 
@@ -111,7 +114,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
     rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) }).slice(0, 6),
     id => getJson(`/v1/prices/${market}/${id}?range=7d`, fetcher), deals.pricesAsOf,
   );
-  console.log('History screening:', JSON.stringify(screened.rejected));
+  console.log('History screening:', JSON.stringify({ auctionPassed: screened.deals.length, craftingPassed: screened.crafts.length, rejected: screened.rejected }));
   const rankedDeals = screened.deals.slice(0, 3);
   const rankedCrafts = screened.crafts.slice(0, 3);
   const ids = [...new Set([...rankedDeals.map(row => row.item.id), ...rankedCrafts.map(row => row.result.id)])].filter(Number.isInteger);
