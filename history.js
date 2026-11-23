@@ -27,20 +27,27 @@ function assessHistory(data, asOf, itemId) {
   const window = (from, to) => points.filter(row => row.age >= from && row.age < to);
   const recent = window(0, 24), previous = window(24, 48), older = window(48, 72);
   const last6 = window(0, 6), previous6 = window(6, 12);
-  if (recent.length < 12 || previous.length < 12 || older.length < 12 || last6.length < 4 || previous6.length < 4 || !points.some(row => row.age <= 2)) return reject('insufficient hourly history');
+  // Player scans are irregular: require distributed coverage, not near-hourly uploads.
+  const coveredDay = rows => rows.length >= 6 &&
+    rows.filter(row => row.age % 24 < 12).length >= 2 &&
+    rows.filter(row => row.age % 24 >= 12).length >= 2 &&
+    Math.max(...rows.map(row => row.age)) - Math.min(...rows.map(row => row.age)) >= 12;
+  if (!coveredDay(recent) || !coveredDay(previous) || last6.length < 2 || previous6.length < 2 || !points.some(row => row.age <= 2)) return reject('insufficient recent history');
+  const hasThirdDay = coveredDay(older);
+  const evaluated = hasThirdDay ? points : window(0, 48);
   const median = rows => quantile(rows.map(row => row.min), 0.5);
   const dailyChange = median(recent) / median(previous) - 1;
-  if (dailyChange < -0.10 || median(recent) / median(older) < 0.85 || median(last6) / median(previous6) < 0.95 || median(last6) / median(recent) < 0.90) return reject('falling price');
-  const floorRange = quantile(points.map(row => row.min), 0.9) / quantile(points.map(row => row.min), 0.1);
-  const medianRange = quantile(points.map(row => row.median), 0.9) / quantile(points.map(row => row.median), 0.1);
+  if (dailyChange < -0.10 || (hasThirdDay && median(recent) / median(older) < 0.85) || median(last6) / median(previous6) < 0.95 || median(last6) / median(recent) < 0.90) return reject('falling price');
+  const floorRange = quantile(evaluated.map(row => row.min), 0.9) / quantile(evaluated.map(row => row.min), 0.1);
+  const medianRange = quantile(evaluated.map(row => row.median), 0.9) / quantile(evaluated.map(row => row.median), 0.1);
   if (floorRange > 1.5 || medianRange > 1.5) return reject('volatile price');
   // Use a lower quartile of actual listing floors, never a weekly rebound assumption.
   const target = Math.floor(Math.min(
     quantile(recent.map(row => row.min), 0.25),
-    quantile(points.map(row => row.min), 0.25),
+    quantile(evaluated.map(row => row.min), 0.25),
     latest.median * 0.95,
   ));
-  return { ok: true, target, dailyChange, samples: points.length, latest };
+  return { ok: true, target, dailyChange, samples: evaluated.length, historyHours: hasThirdDay ? 72 : 48, latest };
 }
 
 function qualifyDeal(row, assessment) {
