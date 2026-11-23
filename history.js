@@ -1,5 +1,6 @@
 const HOUR = 3600000;
 const positive = value => Number.isFinite(value) && value > 0;
+const { balancedPicks } = require('./market');
 
 function quantile(values, fraction) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -10,7 +11,7 @@ function assessHistory(data, asOf, itemId) {
   const end = Date.parse(asOf);
   const latest = data?.latest;
   const observed = Date.parse(latest?.observedAt);
-  const reject = reason => ({ ok: false, reason });
+  const reject = reason => ({ ok: false, reason, item: data?.item });
   if (!Number.isFinite(end) || data?.item?.id !== itemId || !positive(latest?.minBuyout) || !positive(latest?.median) ||
     !Number.isFinite(observed) || Math.abs(end - observed) > 2 * HOUR) return reject('missing or stale item price');
 
@@ -45,33 +46,36 @@ function assessHistory(data, asOf, itemId) {
   const target = Math.floor(Math.min(
     quantile(recent.map(row => row.min), 0.25),
     quantile(evaluated.map(row => row.min), 0.25),
-    latest.median * 0.95,
+    latest.median,
   ));
-  return { ok: true, target, dailyChange, samples: evaluated.length, historyHours: hasThirdDay ? 72 : 48, latest };
+  return { ok: true, target, dailyChange, samples: evaluated.length, historyHours: hasThirdDay ? 72 : 48, latest, item: data.item };
 }
 
 function qualifyDeal(row, assessment) {
   if (!assessment.ok) return assessment;
   const buy = Math.max(row.minBuyout, assessment.latest.minBuyout);
-  const target = Math.min(assessment.target, row.referenceMedian);
+  const target = Math.floor(Math.min(assessment.target, row.referenceMedian) * 0.98);
   const profit = Math.floor(target * 0.95) - buy;
-  if (!positive(buy) || !positive(target) || profit < 10000 || profit / buy < 0.15) return { ok: false, reason: 'insufficient recent margin' };
-  if (!(row.salesPerDay >= 5) || !positive(row.quantity) || row.quantity / row.salesPerDay > 2) return { ok: false, reason: 'slow turnover' };
-  return { ok: true, row: { ...row, minBuyout: buy, referenceMedian: target, profit, evidence: assessment } };
+  if (!positive(buy) || !positive(target) || profit < 10 || profit / buy < 0.03) return { ok: false, reason: 'insufficient recent margin' };
+  if (profit / buy > 1) return { ok: false, reason: 'unusually large margin; verify listings' };
+  if (!(row.salesPerDay >= 20) || !positive(row.quantity) || row.quantity / row.salesPerDay > 3) return { ok: false, reason: 'slow turnover' };
+  const item = assessment.item?.url?.startsWith('https://ahledger.com/') && assessment.item.name ? assessment.item : row.item;
+  return { ok: true, row: { ...row, item, minBuyout: buy, referenceMedian: target, profit, evidence: assessment } };
 }
 
 function qualifyCraft(row, assessment) {
   if (!assessment.ok) return assessment;
-  const target = Math.min(assessment.target, assessment.latest.minBuyout, row.resultPrice);
+  const target = Math.floor(Math.min(assessment.target, assessment.latest.minBuyout, row.resultPrice) * 0.98);
   const yieldMin = row.result.qtyMin;
   const margin = Math.floor(target * yieldMin * 0.95) - row.cost;
-  if (!positive(yieldMin) || !positive(row.cost) || !positive(target) || !Number.isFinite(margin) || margin < 10000 || margin / row.cost < 0.15) return { ok: false, reason: 'insufficient recent margin' };
-  if (!(row.resultSalesPerDay >= 5) || !Number.isFinite(row.resultListed) || row.resultListed < 0 || row.resultListed / row.resultSalesPerDay > 2) return { ok: false, reason: 'slow turnover' };
+  if (!positive(yieldMin) || !positive(row.cost) || !positive(target) || !Number.isFinite(margin) || margin < 10 || margin / row.cost < 0.03) return { ok: false, reason: 'insufficient recent margin' };
+  if (margin / row.cost > 1) return { ok: false, reason: 'unusually large margin; verify recipe' };
+  if (!(row.resultSalesPerDay >= 20) || !Number.isFinite(row.resultListed) || row.resultListed < 0 || row.resultListed / row.resultSalesPerDay > 3) return { ok: false, reason: 'slow turnover' };
   return { ok: true, row: { ...row, margin, resultPrice: target, profitPerDay: margin / yieldMin * row.resultSalesPerDay, evidence: assessment } };
 }
 
 async function screenCandidates(deals, crafts, loadHistory, asOf) {
-  // Up to 16 unique item requests plus 12 feeds and one icon request: below 30/min.
+  // Each output history is loaded once; the caller paces requests to the API limit.
   const ids = [...new Set([...deals.map(row => row.item.id), ...crafts.map(row => row.result.id)])];
   const histories = new Map();
   for (let offset = 0; offset < ids.length; offset += 4) {
@@ -81,16 +85,22 @@ async function screenCandidates(deals, crafts, loadHistory, asOf) {
     }));
   }
   const rejected = {};
+  const rejections = [];
   const apply = (rows, qualify, getId) => rows.flatMap(row => {
     const result = qualify(row, histories.get(getId(row)));
     if (result.ok) return [result.row];
     rejected[result.reason] = (rejected[result.reason] || 0) + 1;
+    rejections.push({ id: getId(row), name: histories.get(getId(row))?.item?.name || (row.result || row.item).name, reason: result.reason });
     return [];
   });
+  const acceptedDeals = apply(deals, qualifyDeal, row => row.item.id);
+  const acceptedCrafts = apply(crafts, qualifyCraft, row => row.result.id);
   const result = {
-    deals: apply(deals, qualifyDeal, row => row.item.id).sort((a, b) => b.profit * Math.min(b.salesPerDay, b.quantity) - a.profit * Math.min(a.salesPerDay, a.quantity)),
-    crafts: apply(crafts, qualifyCraft, row => row.result.id).sort((a, b) => b.profitPerDay - a.profitPerDay),
+    deals: balancedPicks(acceptedDeals, 3),
+    crafts: balancedPicks(acceptedCrafts, 3, true),
+    passed: { deals: acceptedDeals.length, crafts: acceptedCrafts.length },
     rejected,
+    rejections,
   };
   return result;
 }
