@@ -14,3 +14,20 @@ test('concurrent API requests are held until the rolling budget is available', a
   for (const start of starts) assert.ok(starts.filter(t => t >= start && t < start + 1000).length <= 2);
   assert.ok(clock >= 4000);
 });
+
+test('cancelled queued work never starts a network request', async () => {
+  let clock = 0, calls = 0;
+  const controller = new AbortController();
+  const limited = rateLimitedFetch(async () => { calls++; }, {
+    limit: 1, windowMs: 1000, now: () => clock,
+    wait: async () => {
+      await new Promise(resolve => controller.signal.addEventListener('abort', resolve, { once: true }));
+      clock = 1000;
+    },
+  });
+  await limited('first');
+  const queued = limited('second', { signal: controller.signal });
+  controller.abort(new Error('cancelled'));
+  await assert.rejects(queued, /cancelled/);
+  assert.equal(calls, 1);
+});

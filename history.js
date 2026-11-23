@@ -74,20 +74,35 @@ function qualifyCraft(row, assessment) {
   return { ok: true, row: { ...row, margin, resultPrice: target, profitPerDay: margin / yieldMin * row.resultSalesPerDay, evidence: assessment } };
 }
 
-async function screenCandidates(deals, crafts, loadHistory, asOf) {
+async function screenCandidates(deals, crafts, loadHistory, asOf, { signal, cursor = 0, isCached = () => false } = {}) {
   // Each output history is loaded once; the caller paces requests to the API limit.
-  const ids = [...new Set([...deals.map(row => row.item.id), ...crafts.map(row => row.result.id)])];
-  const histories = new Map();
-  for (let offset = 0; offset < ids.length; offset += 4) {
-    await Promise.all(ids.slice(offset, offset + 4).map(async id => {
-      try { histories.set(id, assessHistory(await loadHistory(id), asOf, id)); }
-      catch { histories.set(id, { ok: false, reason: 'history unavailable' }); }
-    }));
+  const interleaved = [];
+  for (let i = 0; i < Math.max(deals.length, crafts.length); i++) {
+    if (crafts[i]) interleaved.push(crafts[i].result.id);
+    if (deals[i]) interleaved.push(deals[i].item.id);
   }
+  const ids = [...new Set(interleaved)];
+  const start = Number.isInteger(cursor) && ids.length ? ((cursor % ids.length) + ids.length) % ids.length : 0;
+  const rotated = [...ids.slice(start), ...ids.slice(0, start)];
+  const cached = new Set(ids.filter(isCached));
+  const queue = [...rotated.filter(id => cached.has(id)), ...rotated.filter(id => !cached.has(id))];
+  const histories = new Map();
+  let next = 0;
+  let received = 0;
+  let nextCursor = start;
+  const worker = async () => {
+    while (next < queue.length && !signal?.aborted) {
+      const id = queue[next++];
+      if (!cached.has(id)) nextCursor = (ids.indexOf(id) + 1) % ids.length;
+      try { histories.set(id, assessHistory(await loadHistory(id, { signal }), asOf, id)); received++; }
+      catch { histories.set(id, { ok: false, reason: 'history unavailable' }); }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
   const rejected = {};
   const rejections = [];
   const apply = (rows, qualify, getId) => rows.flatMap(row => {
-    const result = qualify(row, histories.get(getId(row)));
+    const result = qualify(row, histories.get(getId(row)) || { ok: false, reason: 'history not checked this refresh' });
     if (result.ok) return [result.row];
     rejected[result.reason] = (rejected[result.reason] || 0) + 1;
     rejections.push({ id: getId(row), name: histories.get(getId(row))?.item?.name || (row.result || row.item).name, reason: result.reason });
@@ -101,6 +116,7 @@ async function screenCandidates(deals, crafts, loadHistory, asOf) {
     passed: { deals: acceptedDeals.length, crafts: acceptedCrafts.length },
     rejected,
     rejections,
+    coverage: { total: ids.length, attempted: next, received, partial: received < ids.length, nextCursor },
   };
   return result;
 }

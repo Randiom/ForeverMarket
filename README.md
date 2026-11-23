@@ -74,4 +74,12 @@ Supported crafting categories: Alchemy, Blacksmithing, Cooking, Enchanting, Engi
 
 ## Request timeouts
 
-AHledger reads have a 30-second deadline and one retry for transient network errors or timeouts, including stalled response bodies. Each retry is counted in the shared rate budget; the second failure names the endpoint and profession in the log without printing credentials. HTTP 429/503 responses retain their Retry-After handling. Discord calls have a 30-second deadline and are not blindly retried. Refresh-stage logs show whether the bot is fetching feeds, checking quotes/history, or updating Discord. A timeout does not itself show that the hosting plan has hit a resource limit.
+Required AHledger feed/quote reads have a 30-second deadline and one retry for transient network errors or timeouts, including stalled response bodies. A refresh has a shared **45-second API-read budget**. History reads have a **10-second deadline and one attempt** so a slow item cannot consume a full minute by itself. Each retry is counted in the shared rate budget; the second failure names the endpoint and profession in the log without printing credentials. HTTP 429/503 responses retain their Retry-After handling. Discord calls have a 30-second deadline and are not blindly retried. Refresh-stage logs show whether the bot is fetching feeds, checking quotes/history, or updating Discord. A timeout does not itself show that the hosting plan has hit a resource limit.
+
+## Partial refreshes and request batching
+
+The price table fetches the entire market in one call. Current item/reagent quotes are already batched up to 100 IDs per request. The documented historical-price endpoint takes one item ID per call; quote batching cannot replace hourly history without weakening the stability checks.
+
+History reads use four continuous workers, rather than blocking groups of four. An available worker starts its next item immediately. Crafts and auction candidates alternate in the queue, still-fresh cached histories are checked first, and the next refresh rotates to unfinished work. Only HTTP-cache-valid responses are reused.
+
+When the 45-second read budget expires, queued requests are cancelled and remaining histories are skipped. The bot publishes validated results from completed checks and labels the board **Partial refresh · X/Y histories checked**; an unchecked item is not marked safe or treated as an ordinary price rejection. If mandatory feeds fail before screening can begin, the existing board remains untouched. Discord has its separate 30-second delivery deadline, so the full refresh is not guaranteed to finish in exactly one minute during a Discord outage. The overlap guard remains enabled.

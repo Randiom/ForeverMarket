@@ -83,8 +83,8 @@ function rankCrafts(data, limit = 40) {
   return balancedPicks(candidates, limit, true);
 }
 
-async function getJson(path, fetcher) {
-  const response = await fetcher(`${API}${path}`, { headers: { Accept: 'application/json' } });
+async function getJson(path, fetcher, options = {}) {
+  const response = await fetcher(`${API}${path}`, { ...options, headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error(`AHledger returned HTTP ${response.status} for ${path}`);
   return response.json();
 }
@@ -95,7 +95,7 @@ async function getPriceTable(market, fetcher) {
   return parsePriceTable(await response.text(), market);
 }
 
-function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profession = 'Leatherworking') {
+function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profession = 'Leatherworking', coverage) {
   const timestamp = new Date(asOf);
   if (!Number.isFinite(timestamp.getTime())) throw new Error('AHledger returned no valid scan time');
   if (Date.now() - timestamp.getTime() > 6 * 60 * 60 * 1000) throw new Error(`AHledger scan is stale: ${asOf}`);
@@ -107,7 +107,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
         ...(i ? [{ type: 14, divider: true, spacing: 1 }] : []),
         itemBlock(row, icons, crafting),
       ]),
-      ...(!rows.length ? [{ type: 10, content: 'No opportunities pass recent-history, stability, profit and turnover checks.' }] : []),
+      ...(!rows.length ? [{ type: 10, content: coverage?.partial ? 'No validated picks in the histories checked so far.' : 'No opportunities pass recent-history, stability, profit and turnover checks.' }] : []),
     ],
   });
   const dealRows = deals.slice(0, 3), craftRows = crafts.slice(0, 3);
@@ -115,7 +115,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
     flags: 32768,
     allowed_mentions: { parse: [] },
     components: [
-      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Checks every minute; source scans may be older` },
+      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Checks every minute; source scans may be older${coverage ? `\n-# ${coverage.partial ? 'Partial refresh · ' : ''}${coverage.received}/${coverage.total} histories checked` : ''}` },
       section('Buy & resell', dealRows, false, 0x53ad91),
       section(`Craft & sell · ${profession}`, craftRows, true, 0x8e9be0),
       ...(watch.length ? [{ type: 17, accent_color: 0x8394a5, components: [
@@ -134,12 +134,13 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
   return payload;
 }
 
-async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '', apiClient, profession = process.env.CRAFTING_PROFESSION || 'Leatherworking' } = {}) {
+async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '', apiClient, profession = process.env.CRAFTING_PROFESSION || 'Leatherworking', signal = AbortSignal.timeout(45000), historyState = { cursor: 0 } } = {}) {
   if (!/^forever\.(normal|pvp|rp|rppvp)\.(alliance|horde)\.(us|eu|cn|kr)$/.test(market)) throw new Error('Invalid AHLEDGER_MARKET');
   if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(webhook || '')) throw new Error('Set DISCORD_WEBHOOK_URL to a Discord webhook URL');
   apiKey = apiKey.trim();
   if (apiKey && !/^ahlk_[\w-]+$/.test(apiKey)) throw new Error('AHLEDGER_API_KEY has an invalid format');
-  const apiFetch = apiClient || createApiClient(fetcher, { apiKey });
+  const client = apiClient || createApiClient(fetcher, { apiKey });
+  const apiFetch = (url, options = {}) => client(url, { ...options, signal });
   const selectedProfessions = craftingProfessions(profession);
   console.log(`Fetching market table and ${selectedProfessions.join(', ')} recipes`);
   // The unfiltered crafting response stops at 500 rows; each profession fits below that cap.
@@ -159,6 +160,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   console.log(`Checking current quotes for ${quoteIds.length} items`);
   let quotes = {};
   for (let offset = 0; offset < quoteIds.length; offset += 100) {
+    if (signal.aborted) break;
     try {
       const tooltip = await getJson(`/v1/tooltip/${market}?items=${quoteIds.slice(offset, offset + 100).join(',')}`, apiFetch);
       if (tooltip.market?.slug !== market.replaceAll('.', '/')) throw new Error('Quote market mismatch');
@@ -170,8 +172,11 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   const screened = await screenCandidates(
     dealCandidates,
     pricedCrafts,
-    id => getJson(`/v1/prices/${market}/${id}?range=7d`, apiFetch), asOf,
+    (id, options) => getJson(`/v1/prices/${market}/${id}?range=7d`, apiFetch, { ...options, timeoutMs: 10000, attempts: 1 }), asOf,
+    { signal, cursor: historyState.cursor, isCached: id => client.hasFresh?.(`${API}/v1/prices/${market}/${id}?range=7d`) || false },
   );
+  historyState.cursor = screened.coverage.nextCursor;
+  console.log('History coverage:', JSON.stringify(screened.coverage));
   console.log('History screening:', JSON.stringify({ auctionChecked: dealCandidates.length, craftingShortlisted: craftCandidates.length, craftingInputRejected: craftCandidates.length - pricedCrafts.length, craftingChecked: pricedCrafts.length, auctionPassed: screened.passed.deals, craftingPassed: screened.passed.crafts, rejected: screened.rejected }));
   console.log('Rejected candidates:', JSON.stringify(screened.rejections));
   const rankedDeals = screened.deals.slice(0, 3);
@@ -179,7 +184,7 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   const icons = Object.fromEntries(Object.entries(quotes).map(([id, item]) => [id, item.icon]));
   const pickedIds = new Set([...rankedDeals.map(row => row.item.id), ...rankedCrafts.map(row => row.result.id)]);
   const watch = watchCandidates.map(row => quotes[row.item.id]).filter(item => item?.name && !pickedIds.has(item.id) && item.minBuyout > 0 && item.median > 0 && item.salesPerDay >= 100 && Number.isFinite(Date.parse(item.observedAt)) && Math.abs(Date.parse(item.observedAt) - Date.parse(asOf)) <= 7200000).slice(0, 2);
-  const payload = makePayload(rankedDeals, rankedCrafts, asOf, market, icons, watch, selectedProfessions.length === 1 ? selectedProfessions[0] : 'All professions');
+  const payload = makePayload(rankedDeals, rankedCrafts, asOf, market, icons, watch, selectedProfessions.length === 1 ? selectedProfessions[0] : 'All professions', screened.coverage);
   console.log('Updating Discord market board');
   await updateMessage({ webhook, payload, fetcher, stateFile, messageId });
   return payload;
@@ -190,12 +195,13 @@ if (require.main === module) {
   else {
     let busy = false;
     let apiClient;
+    const historyState = { cursor: 0 };
     const tick = async () => {
       if (busy) { console.log('Previous refresh still running; skipping overlapping minute tick'); return; }
       busy = true;
       try {
         apiClient ||= createApiClient(fetch, { apiKey: process.env.AHLEDGER_API_KEY || '' });
-        await run({ apiClient });
+        await run({ apiClient, historyState });
         console.log('Updated market board');
       }
       catch (error) { console.error(error.message); }
