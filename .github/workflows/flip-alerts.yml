@@ -1,7 +1,5 @@
 name: AHledger flip alerts
 on:
-  schedule:
-    - cron: '3,18,33,48 * * * *'
   workflow_dispatch:
 permissions:
   contents: read

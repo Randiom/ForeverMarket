@@ -1,6 +1,6 @@
 # ForeverMarket
 
-A live Discord market board for WoW Forever's **EU PvP Horde** auction house. Every 15 minutes it refreshes the same message with three auction flips and three crafting opportunities, compact gold prices, estimated profit and ROI, and item icons. Links open the full deal and crafting lists.
+A live Discord market board for WoW Forever's **EU PvP Horde** auction house. Every minute it refreshes the same message with three auction flips and three crafting opportunities, compact gold prices, estimated cash margins, and item icons. Links open the full deal and crafting lists.
 
 ## Run on Bot-Hosting.net
 
@@ -21,7 +21,7 @@ Set `DISCORD_WEBHOOK_URL` in your environment; `.env` files are not loaded autom
 ```sh
 npm test
 npm run once   # create or update the board once
-npm start      # update immediately, then every 15 minutes
+npm start      # update immediately, then every minute
 ```
 
 Optional settings:
@@ -35,7 +35,7 @@ Optional settings:
 
 ## GitHub Actions alternative
 
-The workflow updates at minutes 3, 18, 33, and 48 and supports manual runs. It reads the `DISCORD_WEBHOOK_URL` and optional `AHLEDGER_API_KEY` repository secrets and caches the board's message ID between runners. To adopt an existing message, add a repository **variable** called `DISCORD_MESSAGE_ID`. GitHub can delay scheduled runs. If its cache is evicted, the configured message ID allows adoption again; without it a new board is created.
+The workflow is manual-only. Keep the continuously running `npm start` process on Bot-Hosting.net for minute-by-minute checks. It reads the `DISCORD_WEBHOOK_URL` and optional `AHLEDGER_API_KEY` repository secrets and caches the board's message ID between runners. To adopt an existing message, add a repository **variable** called `DISCORD_MESSAGE_ID`. If its cache is evicted, the configured message ID allows adoption again; without it a new board is created.
 
 Run one scheduler. **Disable the GitHub Actions workflow when hosting on Bot-Hosting.net.** Separate hosts do not share state files and will otherwise maintain separate boards. Existing historical reports are not deleted by the bot.
 
@@ -43,7 +43,7 @@ Run one scheduler. **Disable the GitHub Actions workflow when hosting on Bot-Hos
 
 The board balances **volume and entry cost**, not headline ROI. It selects high-volume candidates first, reserves the next slot for a lower-cost candidate (preferring trainer recipes up to skill 150 when available), then another liquid candidate. Outputs are deduplicated. A separate Liquid market watch shows two low-cost, high-volume items using current quotes, even if no validated flips pass. It is explicitly labeled as market information, not a recommendation, and has no profit claim. Percent ROI is not the headline; cards show estimated money per unit or craft, current input cost, target output price, output quantity, required skill, the recipe source reported by the feed, and a small example batch. The example is at most ten purchases/crafts, aims for at most 5% of estimated market sales and 10g of inputs, and respects quoted reagent availability. It always shows at least one unit/craft; expensive single crafts can exceed the example budget. Examples are calculations, not reserved inventory or guaranteed sales.
 
-Auction candidates now come from the **whole AHledger price table**, rather than its large-discount deals endpoint. A small spread on a common material can qualify without a 25% historical discount. Crafting candidates come from all profession feeds. Before history checks, choose up to forty of each without a key (eighty outputs total), or one hundred of each with `AHLEDGER_API_KEY` (two hundred outputs total). The full table covers the market, but this is still a bounded shortlist rather than exhaustive validation of every recipe and item. API requests are paced to 28 starts per rolling minute without a key or 280 with a key; an anonymous refresh can take several minutes. The key is sent only in the Authorization header to AHledger, never to Discord. Recent hourly history remains the short-term screen; longer history access does not turn old peaks into targets. Quote requests are batched in groups of at most 100 IDs so expanded coverage does not silently omit reagents. Concurrent refreshes do not overlap. The GitHub Actions timeout is ten minutes. Console logs report the checked/passing counts and individual rejection reasons.
+Auction candidates now come from the **whole AHledger price table**, rather than its large-discount deals endpoint. A small spread on a common material can qualify without a 25% historical discount. Crafting candidates come from all profession feeds. Before history checks, choose up to forty of each without a key (eighty outputs total), or one hundred of each with `AHLEDGER_API_KEY` (two hundred outputs total). The full table covers the market, but this is still a bounded shortlist rather than exhaustive validation of every recipe and item. The authenticated process has a ceiling of 299 HTTP requests per rolling minute shared across all API endpoints and refreshes; without a key the ceiling is 28. It does not send filler requests to reach that ceiling. Other clients using the same AHledger account share its 300/minute allowance. The limiter survives successive refreshes; each minute starts a refresh only if the previous one has completed. An anonymous refresh can take several minutes. If a pass overruns, the next tick is skipped and logged. The client honors `Cache-Control`/`Age`, discards cached responses when they expire, and honors `Retry-After` on 429/503 errors. Checking every minute does not create new upstream scans or bypass cache lifetimes. The key is sent only in the Authorization header to AHledger, never to Discord. Recent hourly history remains the short-term screen; longer history access does not turn old peaks into targets. Quote requests are batched in groups of at most 100 IDs so expanded coverage does not silently omit reagents. Concurrent refreshes do not overlap. The GitHub Actions timeout is ten minutes. Console logs report the checked/passing counts and individual rejection reasons.
 
 Require at least 10 copper of net profit per unit/craft, 3% return on input cost, twenty estimated market-wide unit sales a day, and no more than three days of listed supply. Large unit yields count as units when sizing batches. A margin above 100% is excluded for manual verification of listings or recipe restrictions; it is not silently capped or marketed as a windfall. Smaller profitable bulk crafts no longer fail the old 1g/15% cutoffs.
 
