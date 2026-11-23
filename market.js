@@ -6,9 +6,9 @@ function parsePriceTable(text, market) {
   if (format !== 'AHL1' || slug !== market.replaceAll('.', '/') || !positive(Number(timestamp)) || Number(count) !== lines.length) throw new Error('Invalid AHledger price table');
   const deals = lines.flatMap(line => {
     const fields = line.split(':').map(value => value === '' ? null : Number(value));
-    const [id, median, minBuyout, quantity, median7d, median30d, , , salesTenths] = fields;
+    const [id, median, minBuyout, quantity, , , , , salesTenths] = fields;
     if (!Number.isInteger(id) || id < 1 || !positive(median) || !positive(minBuyout) || !positive(quantity) || !positive(salesTenths)) return [];
-    const referenceMedian = Math.min(median, ...[median7d, median30d].filter(positive));
+    const referenceMedian = median;
     return [{ item: { id, name: `Item ${id}`, url: `https://ahledger.com/items/${id}` }, median, minBuyout, referenceMedian, quantity, salesPerDay: salesTenths / 10 }];
   });
   return { market, tableGeneratedAt: new Date(Number(timestamp) * 1000).toISOString(), marketStatus: Number(count) > 0 ? 'scanned' : 'no scans', deals };
@@ -49,10 +49,20 @@ function priceMaterials(row, quotes, asOf) {
     const age = Math.abs(Date.parse(quote?.observedAt) - Date.parse(asOf));
     if (!quote || !positive(quote.median) || !positive(quote.minBuyout) || !positive(reagent.qty) || !Number.isFinite(quote.quantity) || quote.quantity < reagent.qty || !Number.isFinite(age) || age > 7200000) return null;
     // Cost a purchase from current AH quotes; never assume free farmed or vendor materials.
-    const price = Math.ceil(Math.max(quote.median, quote.minBuyout, reagent.price || 0) * 1.02);
+    const price = Math.ceil(Math.max(quote.median, quote.minBuyout) * 1.02);
     reagents.push({ ...reagent, price, available: quote.quantity });
   }
   return { ...row, reagents, cost: reagents.reduce((sum, reagent) => sum + reagent.qty * reagent.price, 0) };
 }
 
-module.exports = { parsePriceTable, limitedCraft, balancedPicks, priceMaterials };
+function currentCraft(row, quotes, asOf) {
+  const priced = priceMaterials(row, quotes, asOf);
+  const output = quotes[row.result?.id];
+  if (!priced || !output || !positive(output.minBuyout) || !positive(output.median) || !positive(row.result.qtyMin)) return null;
+  const resultPrice = Math.floor(Math.min(output.minBuyout, output.median) * 0.98);
+  const margin = Math.floor(resultPrice * row.result.qtyMin * 0.95) - priced.cost;
+  return { ...priced, resultPrice, margin, resultSalesPerDay: output.salesPerDay,
+    resultListed: output.quantity, resultClearDays: output.quantity / output.salesPerDay };
+}
+
+module.exports = { parsePriceTable, limitedCraft, balancedPicks, priceMaterials, currentCraft };

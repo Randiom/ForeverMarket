@@ -1,6 +1,5 @@
 const { updateMessage } = require('./message');
-const { screenCandidates } = require('./history');
-const { parsePriceTable, limitedCraft, balancedPicks, priceMaterials } = require('./market');
+const { parsePriceTable, limitedCraft, balancedPicks, currentCraft } = require('./market');
 const { createApiClient } = require('./api-client');
 const API = 'https://api.ahledger.com';
 const MARKET = process.env.AHLEDGER_MARKET || 'forever.pvp.horde.eu';
@@ -55,8 +54,7 @@ function itemBlock(row, icons, crafting = false) {
   const count = Math.max(1, Math.floor(Math.min(10, sales * 0.05 / yieldMin, 100000 / cost,
     ...(crafting ? (row.reagents || []).map(reagent => Number.isFinite(reagent.available) ? reagent.available / reagent.qty : 1) : [row.quantity]))));
   const example = `Example ${count} ${crafting ? 'crafts' : 'units'}: ${gold(cost * count)} cost · ~${gold(profit * count)} net`;
-  const evidence = row.evidence ? `\n-# 24h floor ${row.evidence.dailyChange >= 0 ? '+' : ''}${Math.round(row.evidence.dailyChange * 100)}% vs prior day · ${row.evidence.samples} hourly samples/${(row.evidence.historyHours || 72) / 24}d` : '';
-  const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**~+${gold(profit)}/${crafting ? 'craft' : 'unit'}** · ${label}\n${details}\n${example}\nMarket ~${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })} units/day${evidence}` };
+  const text = { type: 10, content: `[${name}](${url.length < 220 ? url : 'https://ahledger.com'})\n**~+${gold(profit)}/${crafting ? 'craft' : 'unit'}** · ${label}\n${details}\n${example}\nMarket ~${sales.toLocaleString('en-US', { maximumFractionDigits: 1 })} units/day` };
   const icon = icons[item.id];
   if (!icon || !/^https:\/\/(render\.worldofwarcraft\.com|wow\.zamimg\.com)\//.test(icon)) return text;
   return { type: 9, components: [text], accessory: { type: 11, media: { url: icon }, description: item.name.slice(0, 100) } };
@@ -64,13 +62,13 @@ function itemBlock(row, icons, crafting = false) {
 
 function rankDeals(data, limit = 40) {
   const candidates = (data.deals || []).map(row => ({ ...row,
-    // An old peak must not dominate the limited history-check budget either.
-    referenceMedian: Number.isFinite(row.median) && row.median > 0 ? Math.min(row.referenceMedian, row.median) : row.referenceMedian,
+    // Resale estimates compare today's median with today's cheapest listing.
+    referenceMedian: Math.floor((Number.isFinite(row.median) && row.median > 0 ? row.median : row.referenceMedian) * 0.98),
   })).filter(row => {
-    const profit = Math.floor(row.referenceMedian * 0.98 * 0.95) - row.minBuyout;
+    const profit = Math.floor(row.referenceMedian * 0.95) - row.minBuyout;
     return row.item?.name && row.item?.url?.startsWith('https://ahledger.com/') &&
       Number.isFinite(profit) && profit >= 10 && profit / row.minBuyout >= 0.03 && profit / row.minBuyout <= 1 && row.salesPerDay >= 20 && row.quantity / row.salesPerDay <= 3 && row.quantity > 0;
-  }).map(row => ({ ...row, profit: Math.floor(row.referenceMedian * 0.98 * 0.95) - row.minBuyout }))
+  }).map(row => ({ ...row, profit: Math.floor(row.referenceMedian * 0.95) - row.minBuyout }))
     .sort((a, b) => b.salesPerDay - a.salesPerDay || a.minBuyout - b.minBuyout);
   return balancedPicks(candidates, limit);
 }
@@ -95,7 +93,7 @@ async function getPriceTable(market, fetcher) {
   return parsePriceTable(await response.text(), market);
 }
 
-function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profession = 'Leatherworking', coverage) {
+function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profession = 'Leatherworking') {
   const timestamp = new Date(asOf);
   if (!Number.isFinite(timestamp.getTime())) throw new Error('AHledger returned no valid scan time');
   if (Date.now() - timestamp.getTime() > 6 * 60 * 60 * 1000) throw new Error(`AHledger scan is stale: ${asOf}`);
@@ -107,7 +105,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
         ...(i ? [{ type: 14, divider: true, spacing: 1 }] : []),
         itemBlock(row, icons, crafting),
       ]),
-      ...(!rows.length ? [{ type: 10, content: coverage?.partial ? 'No validated picks in the histories checked so far.' : 'No opportunities pass recent-history, stability, profit and turnover checks.' }] : []),
+      ...(!rows.length ? [{ type: 10, content: 'No current-price spreads pass profit and turnover checks.' }] : []),
     ],
   });
   const dealRows = deals.slice(0, 3), craftRows = crafts.slice(0, 3);
@@ -115,7 +113,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
     flags: 32768,
     allowed_mentions: { parse: [] },
     components: [
-      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Checks every minute; source scans may be older${coverage ? `\n-# ${coverage.partial ? 'Partial refresh · ' : ''}${coverage.received}/${coverage.total} histories checked` : ''}` },
+      { type: 10, content: `## ForeverMarket\n${marketLabel(market)} · Scan <t:${Math.floor(timestamp.getTime() / 1000)}:R>\n-# Updated <t:${Math.floor(Date.now() / 1000)}:t> · Checks every minute; source scans may be older\n-# Current prices only · asking-price spreads, not guaranteed sales` },
       section('Buy & resell', dealRows, false, 0x53ad91),
       section(`Craft & sell · ${profession}`, craftRows, true, 0x8e9be0),
       ...(watch.length ? [{ type: 17, accent_color: 0x8394a5, components: [
@@ -134,7 +132,7 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = [], profes
   return payload;
 }
 
-async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '', apiClient, profession = process.env.CRAFTING_PROFESSION || 'Leatherworking', signal = AbortSignal.timeout(45000), historyState = { cursor: 0 } } = {}) {
+async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '', apiClient, profession = process.env.CRAFTING_PROFESSION || 'Leatherworking', signal = AbortSignal.timeout(45000) } = {}) {
   if (!/^forever\.(normal|pvp|rp|rppvp)\.(alliance|horde)\.(us|eu|cn|kr)$/.test(market)) throw new Error('Invalid AHLEDGER_MARKET');
   if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(webhook || '')) throw new Error('Set DISCORD_WEBHOOK_URL to a Discord webhook URL');
   apiKey = apiKey.trim();
@@ -152,39 +150,38 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   const asOf = craftFeeds[0]?.pricesAsOf;
   // The table header is its generation time, not the scan timestamp carried by recipe feeds.
   if (!asOf || craftFeeds.some(feed => feed.pricesAsOf !== asOf) || Math.abs(Date.parse(deals.tableGeneratedAt) - Date.parse(asOf)) > 7200000) throw new Error('AHledger table and recipe feeds are out of sync; retry next run');
-  const candidateLimit = apiKey ? 100 : 40;
-  const dealCandidates = rankDeals(deals, candidateLimit);
-  const craftCandidates = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []).filter(row => selectedProfessions.includes(row.recipe?.profession)) }, candidateLimit);
-  const watchCandidates = balancedPicks(deals.deals.filter(row => row.salesPerDay >= 100 && row.minBuyout <= 50000), 4);
-  const quoteIds = [...new Set([...dealCandidates.map(row => row.item.id), ...craftCandidates.flatMap(row => [row.result.id, ...(row.reagents || []).map(reagent => reagent.id)]), ...watchCandidates.map(row => row.item.id)])].filter(Number.isInteger);
-  console.log(`Checking current quotes for ${quoteIds.length} items`);
-  let quotes = {};
-  for (let offset = 0; offset < quoteIds.length; offset += 100) {
-    if (signal.aborted) break;
-    try {
-      const tooltip = await getJson(`/v1/tooltip/${market}?items=${quoteIds.slice(offset, offset + 100).join(',')}`, apiFetch);
-      if (tooltip.market?.slug !== market.replaceAll('.', '/')) throw new Error('Quote market mismatch');
-      Object.assign(quotes, Object.fromEntries((tooltip.items || []).map(item => [item.id, item])));
-    } catch { console.warn('A current quote batch is unavailable; skipping crafts that need those inputs'); }
-  }
-  const pricedCrafts = craftCandidates.map(row => priceMaterials(row, quotes, asOf)).filter(Boolean);
-  console.log(`Checking history for ${dealCandidates.length} auction and ${pricedCrafts.length} crafting candidates`);
-  const screened = await screenCandidates(
-    dealCandidates,
-    pricedCrafts,
-    (id, options) => getJson(`/v1/prices/${market}/${id}?range=7d`, apiFetch, { ...options, timeoutMs: 10000, attempts: 1 }), asOf,
-    { signal, cursor: historyState.cursor, isCached: id => client.hasFresh?.(`${API}/v1/prices/${market}/${id}?range=7d`) || false },
-  );
-  historyState.cursor = screened.coverage.nextCursor;
-  console.log('History coverage:', JSON.stringify(screened.coverage));
-  console.log('History screening:', JSON.stringify({ auctionChecked: dealCandidates.length, craftingShortlisted: craftCandidates.length, craftingInputRejected: craftCandidates.length - pricedCrafts.length, craftingChecked: pricedCrafts.length, auctionPassed: screened.passed.deals, craftingPassed: screened.passed.crafts, rejected: screened.rejected }));
-  console.log('Rejected candidates:', JSON.stringify(screened.rejections));
-  const rankedDeals = screened.deals.slice(0, 3);
-  const rankedCrafts = screened.crafts.slice(0, 3);
-  const icons = Object.fromEntries(Object.entries(quotes).map(([id, item]) => [id, item.icon]));
+  // One market-wide snapshot prices both outputs and materials; no hourly history calls.
+  const quotes = Object.fromEntries(deals.deals.map(row => [row.item.id, {
+    id: row.item.id, median: row.median, minBuyout: row.minBuyout,
+    quantity: row.quantity, salesPerDay: row.salesPerDay, observedAt: asOf,
+  }]));
+  const rankedDeals = rankDeals(deals, 3);
+  const recipeRows = craftFeeds.flatMap(feed => feed.recipes || []).filter(row => selectedProfessions.includes(row.recipe?.profession));
+  const pricedCrafts = recipeRows.map(row => currentCraft(row, quotes, asOf)).filter(Boolean);
+  const rankedCrafts = rankCrafts({ recipes: pricedCrafts }, 3);
   const pickedIds = new Set([...rankedDeals.map(row => row.item.id), ...rankedCrafts.map(row => row.result.id)]);
-  const watch = watchCandidates.map(row => quotes[row.item.id]).filter(item => item?.name && !pickedIds.has(item.id) && item.minBuyout > 0 && item.median > 0 && item.salesPerDay >= 100 && Number.isFinite(Date.parse(item.observedAt)) && Math.abs(Date.parse(item.observedAt) - Date.parse(asOf)) <= 7200000).slice(0, 2);
-  const payload = makePayload(rankedDeals, rankedCrafts, asOf, market, icons, watch, selectedProfessions.length === 1 ? selectedProfessions[0] : 'All professions', screened.coverage);
+  const watch = balancedPicks(deals.deals.filter(row => !pickedIds.has(row.item.id) && row.salesPerDay >= 100 && row.minBuyout <= 50000), 2)
+    .map(row => ({ ...quotes[row.item.id], name: row.item.name }));
+  const displayIds = [...new Set([...pickedIds, ...watch.map(row => row.id)])];
+  const icons = {};
+  // Only enrich displayed items. Failure must not discard independently priced crafts.
+  if (displayIds.length && !signal.aborted) {
+    try {
+      console.log(`Fetching names and pictures for ${displayIds.length} displayed items`);
+      const tooltip = await getJson(`/v1/tooltip/${market}?items=${displayIds.join(',')}`, apiFetch, { timeoutMs: 10000, attempts: 1 });
+      if (tooltip.market?.slug !== market.replaceAll('.', '/')) throw new Error('Quote market mismatch');
+      for (const item of tooltip.items || []) {
+        if (!pickedIds.has(item.id) && !watch.some(row => row.id === item.id)) continue;
+        icons[item.id] = item.icon;
+        if (item.name) {
+          for (const row of rankedDeals) if (row.item.id === item.id) row.item.name = item.name;
+          for (const row of watch) if (row.id === item.id) row.name = item.name;
+        }
+      }
+    } catch { console.warn('Item names/pictures unavailable; using current-price table results without enrichment'); }
+  }
+  console.log('Current-price screening:', JSON.stringify({ auctionItems: deals.deals.length, recipes: recipeRows.length, pricedCrafts: pricedCrafts.length, auctionPicks: rankedDeals.length, craftingPicks: rankedCrafts.length }));
+  const payload = makePayload(rankedDeals, rankedCrafts, asOf, market, icons, watch, selectedProfessions.length === 1 ? selectedProfessions[0] : 'All professions');
   console.log('Updating Discord market board');
   await updateMessage({ webhook, payload, fetcher, stateFile, messageId });
   return payload;
@@ -195,13 +192,12 @@ if (require.main === module) {
   else {
     let busy = false;
     let apiClient;
-    const historyState = { cursor: 0 };
     const tick = async () => {
       if (busy) { console.log('Previous refresh still running; skipping overlapping minute tick'); return; }
       busy = true;
       try {
         apiClient ||= createApiClient(fetch, { apiKey: process.env.AHLEDGER_API_KEY || '' });
-        await run({ apiClient, historyState });
+        await run({ apiClient });
         console.log('Updated market board');
       }
       catch (error) { console.error(error.message); }
