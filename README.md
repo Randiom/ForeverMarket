@@ -4,7 +4,7 @@ A live Discord market board for WoW Forever's **EU PvP Horde** auction house. Ev
 
 ## Run on Bot-Hosting.net
 
-Use Node.js 22 or newer, clone `https://github.com/Randiom/ForeverMarket` on branch `main`, and set the entry file to `bot.js`. Add `DISCORD_WEBHOOK_URL` as a secret in the host's Env tab. Start the deployment. There are no external dependencies.
+Use Node.js 22 or newer, clone `https://github.com/Randiom/ForeverMarket` on branch `main`, and set the entry file to `bot.js`. Add `DISCORD_WEBHOOK_URL` as a secret in the host's Env tab. Add your free AHledger key as the secret `AHLEDGER_API_KEY` to enable broader and faster scans. Start the deployment. There are no external dependencies.
 
 The first run creates a board. The bot saves its message ID in `.state/discord-message.json`; subsequent runs edit it, including after restarts. **Preserve this file when syncing or redeploying.** Store it on persistent disk. To use a different persistent path, set `MESSAGE_STATE_FILE`. If you run another host or erase this state, the bot cannot discover its old message and creates another one.
 
@@ -28,13 +28,14 @@ Optional settings:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `AHLEDGER_API_KEY` | unset | Free AHledger key; enables up to 100 auction + 100 crafted outputs per refresh |
 | `AHLEDGER_MARKET` | `forever.pvp.horde.eu` | Market to track |
 | `MESSAGE_STATE_FILE` | `.state/discord-message.json` | Persistent message state path |
 | `DISCORD_MESSAGE_ID` | unset | Existing webhook message to adopt when no state exists |
 
 ## GitHub Actions alternative
 
-The workflow updates at minutes 3, 18, 33, and 48 and supports manual runs. It reads the `DISCORD_WEBHOOK_URL` repository secret and caches the board's message ID between runners. To adopt an existing message, add a repository **variable** called `DISCORD_MESSAGE_ID`. GitHub can delay scheduled runs. If its cache is evicted, the configured message ID allows adoption again; without it a new board is created.
+The workflow updates at minutes 3, 18, 33, and 48 and supports manual runs. It reads the `DISCORD_WEBHOOK_URL` and optional `AHLEDGER_API_KEY` repository secrets and caches the board's message ID between runners. To adopt an existing message, add a repository **variable** called `DISCORD_MESSAGE_ID`. GitHub can delay scheduled runs. If its cache is evicted, the configured message ID allows adoption again; without it a new board is created.
 
 Run one scheduler. **Disable the GitHub Actions workflow when hosting on Bot-Hosting.net.** Separate hosts do not share state files and will otherwise maintain separate boards. Existing historical reports are not deleted by the bot.
 
@@ -42,7 +43,7 @@ Run one scheduler. **Disable the GitHub Actions workflow when hosting on Bot-Hos
 
 The board balances **volume and entry cost**, not headline ROI. It selects high-volume candidates first, reserves the next slot for a lower-cost candidate (preferring trainer recipes up to skill 150 when available), then another liquid candidate. Outputs are deduplicated. A separate Liquid market watch shows two low-cost, high-volume items using current quotes, even if no validated flips pass. It is explicitly labeled as market information, not a recommendation, and has no profit claim. Percent ROI is not the headline; cards show estimated money per unit or craft, current input cost, target output price, output quantity, required skill, the recipe source reported by the feed, and a small example batch. The example is at most ten purchases/crafts, aims for at most 5% of estimated market sales and 10g of inputs, and respects quoted reagent availability. It always shows at least one unit/craft; expensive single crafts can exceed the example budget. Examples are calculations, not reserved inventory or guaranteed sales.
 
-Auction candidates now come from the **whole AHledger price table**, rather than its large-discount deals endpoint. A small spread on a common material can qualify without a 25% historical discount. Crafting candidates come from all profession feeds. Before history checks, choose up to forty of each (eighty outputs total). The full table covers the market, but this is still a bounded shortlist rather than exhaustive validation of every recipe and item. API requests are paced to 28 starts per rolling minute; a refresh can take several minutes. Quote requests are batched in groups of at most 100 IDs so expanded coverage does not silently omit reagents. Concurrent refreshes do not overlap. The GitHub Actions timeout is ten minutes. Console logs report the checked/passing counts and individual rejection reasons.
+Auction candidates now come from the **whole AHledger price table**, rather than its large-discount deals endpoint. A small spread on a common material can qualify without a 25% historical discount. Crafting candidates come from all profession feeds. Before history checks, choose up to forty of each without a key (eighty outputs total), or one hundred of each with `AHLEDGER_API_KEY` (two hundred outputs total). The full table covers the market, but this is still a bounded shortlist rather than exhaustive validation of every recipe and item. API requests are paced to 28 starts per rolling minute without a key or 280 with a key; an anonymous refresh can take several minutes. The key is sent only in the Authorization header to AHledger, never to Discord. Recent hourly history remains the short-term screen; longer history access does not turn old peaks into targets. Quote requests are batched in groups of at most 100 IDs so expanded coverage does not silently omit reagents. Concurrent refreshes do not overlap. The GitHub Actions timeout is ten minutes. Console logs report the checked/passing counts and individual rejection reasons.
 
 Require at least 10 copper of net profit per unit/craft, 3% return on input cost, twenty estimated market-wide unit sales a day, and no more than three days of listed supply. Large unit yields count as units when sizing batches. A margin above 100% is excluded for manual verification of listings or recipe restrictions; it is not silently capped or marketed as a windfall. Smaller profitable bulk crafts no longer fail the old 1g/15% cutoffs.
 

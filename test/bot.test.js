@@ -117,6 +117,8 @@ test('corrupt state fails safely without sending another message', async t => {
 test('fetches prices and icons, then updates the persisted board', async t => {
   const stateFile = await state(t);
   const fetcher = async (url, options) => {
+    if (url.startsWith('https://api.ahledger.com/')) assert.equal(options.headers.Authorization, 'Bearer ahlk_test_only');
+    else assert.equal(options.headers.Authorization, undefined);
     const common = { market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: now };
     if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(now) / 1000}|1\n1:100000:50000:3:100000:100000:90000:110000:500`);
     if (url.includes('/crafting/')) return response({ ...common, recipes: url.includes('profession=Alchemy') ? [craft] : [] });
@@ -128,7 +130,7 @@ test('fetches prices and icons, then updates the persisted board', async t => {
     assert.match(options.method, /POST|PATCH/);
     return response({ id: '456' });
   };
-  const payload = await run({ fetcher, webhook, stateFile });
+  const payload = await run({ fetcher, webhook, stateFile, apiKey: 'ahlk_test_only' });
   assert.equal(payload.flags, 32768);
   assert.match(JSON.stringify(payload), /hourly samples/);
   assert.equal(JSON.parse(await fs.readFile(stateFile)).id, '456');

@@ -27,6 +27,7 @@ jobs:
       - run: npm run once
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          AHLEDGER_API_KEY: ${{ secrets.AHLEDGER_API_KEY }}
           DISCORD_MESSAGE_ID: ${{ vars.DISCORD_MESSAGE_ID }}
           AHLEDGER_MARKET: forever.pvp.horde.eu
       - name: Save board message ID

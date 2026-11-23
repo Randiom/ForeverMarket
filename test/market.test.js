@@ -71,3 +71,8 @@ test('the history shortlist includes forty distinct outputs instead of only eigh
   assert.equal(candidates.length, 40);
   assert.ok(candidates.some(row => row.result.id > 8));
 });
+
+test('authenticated scanning can select one hundred distinct crafted outputs', () => {
+  const rows = Array.from({ length: 125 }, (_, i) => ({ ...craft, result: { ...craft.result, id: i + 1 }, resultSalesPerDay: 1000 - i }));
+  assert.equal(rankCrafts({ recipes: rows }, 100).length, 100);
+});

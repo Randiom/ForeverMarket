@@ -54,7 +54,7 @@ function itemBlock(row, icons, crafting = false) {
   return { type: 9, components: [text], accessory: { type: 11, media: { url: icon }, description: item.name.slice(0, 100) } };
 }
 
-function rankDeals(data) {
+function rankDeals(data, limit = 40) {
   const candidates = (data.deals || []).map(row => ({ ...row,
     // An old peak must not dominate the limited history-check budget either.
     referenceMedian: Number.isFinite(row.median) && row.median > 0 ? Math.min(row.referenceMedian, row.median) : row.referenceMedian,
@@ -64,15 +64,15 @@ function rankDeals(data) {
       Number.isFinite(profit) && profit >= 10 && profit / row.minBuyout >= 0.03 && profit / row.minBuyout <= 1 && row.salesPerDay >= 20 && row.quantity / row.salesPerDay <= 3 && row.quantity > 0;
   }).map(row => ({ ...row, profit: Math.floor(row.referenceMedian * 0.98 * 0.95) - row.minBuyout }))
     .sort((a, b) => b.salesPerDay - a.salesPerDay || a.minBuyout - b.minBuyout);
-  return balancedPicks(candidates, 40);
+  return balancedPicks(candidates, limit);
 }
 
-function rankCrafts(data) {
+function rankCrafts(data, limit = 40) {
   const candidates = (data.recipes || []).filter(row => row.recipe?.name &&
     row.result?.url?.startsWith('https://ahledger.com/') &&
     !limitedCraft(row) && row.unpriced?.length === 0 && row.margin >= 10 && row.cost > 0 &&
     row.margin / row.cost >= 0.03 && row.margin / row.cost <= 1 && row.resultSalesPerDay >= 20 && row.resultClearDays <= 3);
-  return balancedPicks(candidates, 40, true);
+  return balancedPicks(candidates, limit, true);
 }
 
 async function getJson(path, fetcher = fetch) {
@@ -126,10 +126,14 @@ function makePayload(deals, crafts, asOf, market, icons = {}, watch = []) {
   return payload;
 }
 
-async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId } = {}) {
+async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL, market = MARKET, stateFile, messageId, apiKey = process.env.AHLEDGER_API_KEY || '' } = {}) {
   if (!/^forever\.(normal|pvp|rp|rppvp)\.(alliance|horde)\.(us|eu|cn|kr)$/.test(market)) throw new Error('Invalid AHLEDGER_MARKET');
   if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(webhook || '')) throw new Error('Set DISCORD_WEBHOOK_URL to a Discord webhook URL');
-  const apiFetch = rateLimitedFetch(fetcher);
+  apiKey = apiKey.trim();
+  if (apiKey && !/^ahlk_[\w-]+$/.test(apiKey)) throw new Error('AHLEDGER_API_KEY has an invalid format');
+  const apiFetch = rateLimitedFetch((url, options = {}) => fetcher(url, {
+    ...options, headers: { ...options.headers, ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+  }), { limit: apiKey ? 280 : 28 });
   // The unfiltered crafting response stops at 500 rows; each profession fits below that cap.
   const [deals, ...craftFeeds] = await Promise.all([
     getPriceTable(market, apiFetch),
@@ -139,8 +143,9 @@ async function run({ fetcher = fetch, webhook = process.env.DISCORD_WEBHOOK_URL,
   const asOf = craftFeeds[0]?.pricesAsOf;
   // The table header is its generation time, not the scan timestamp carried by recipe feeds.
   if (!asOf || craftFeeds.some(feed => feed.pricesAsOf !== asOf) || Math.abs(Date.parse(deals.tableGeneratedAt) - Date.parse(asOf)) > 7200000) throw new Error('AHledger table and recipe feeds are out of sync; retry next run');
-  const dealCandidates = rankDeals(deals);
-  const craftCandidates = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) });
+  const candidateLimit = apiKey ? 100 : 40;
+  const dealCandidates = rankDeals(deals, candidateLimit);
+  const craftCandidates = rankCrafts({ recipes: craftFeeds.flatMap(feed => feed.recipes || []) }, candidateLimit);
   const watchCandidates = balancedPicks(deals.deals.filter(row => row.salesPerDay >= 100 && row.minBuyout <= 50000), 4);
   const quoteIds = [...new Set([...dealCandidates.map(row => row.item.id), ...craftCandidates.flatMap(row => [row.result.id, ...(row.reagents || []).map(reagent => reagent.id)]), ...watchCandidates.map(row => row.item.id)])].filter(Number.isInteger);
   let quotes = {};
