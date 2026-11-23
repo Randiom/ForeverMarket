@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { copper, rankDeals, rankCrafts, run } = require('../bot');
+const { copper, rankDeals, rankCrafts, makePayload, run } = require('../bot');
 
 const item = { name: 'Test @everyone', url: 'https://ahledger.com/items/1-test' };
 const now = new Date().toISOString();
@@ -23,11 +23,38 @@ test('fetches both feeds and posts a safe, credited webhook report', async () =>
   };
   await run({ fetcher, webhook: 'https://discord.com/api/webhooks/123/token' });
   assert.equal(sent.embeds.length, 2);
-  assert.equal(sent.embeds[1].description.split('\n').length, 1);
-  assert.match(sent.embeds[0].description, /4g 50s 0c net\/unit/);
-  assert.match(sent.embeds[0].description, /@\u200beveryone/);
+  assert.equal(sent.embeds[1].fields.length, 1);
+  assert.match(sent.embeds[0].fields[0].value, /4.50g net\/unit/);
+  assert.match(sent.embeds[0].fields[0].name, /@\u200beveryone/);
+  assert.match(sent.embeds[0].description, /EU · PvP · Horde/);
+  assert.equal(sent.embeds[0].fields[0].inline, false);
   assert.deepEqual(sent.allowed_mentions, { parse: [] });
   assert.match(sent.content, /Prices from AHledger/);
+});
+
+test('long item names and URLs fit Discord embed limits', () => {
+  const longItem = { name: '@_'.repeat(100), url: `https://ahledger.com/items/${'x'.repeat(400)}` };
+  const deals = Array.from({ length: 8 }, () => ({ ...deal, item: longItem, profit: 45000 }));
+  const crafts = Array.from({ length: 8 }, () => ({ ...craft, result: longItem }));
+  const payload = makePayload(deals, crafts, now, 'forever.pvp.horde.eu');
+  let total = 0;
+  for (const embed of payload.embeds) {
+    total += embed.title.length + embed.description.length + embed.footer.text.length;
+    assert.ok(embed.fields.length <= 25);
+    for (const field of embed.fields) {
+      assert.ok(field.name.length <= 256);
+      assert.ok(field.value.length <= 1024);
+      total += field.name.length + field.value.length;
+    }
+  }
+  assert.ok(total <= 6000);
+});
+
+test('empty reports explain filters and link to the source', () => {
+  const payload = makePayload([], [], now, 'forever.pvp.horde.eu');
+  assert.match(payload.embeds[0].description, /No deals meet/);
+  assert.match(payload.embeds[1].description, /No crafts meet/);
+  assert.ok(payload.embeds.every(embed => embed.url.startsWith('https://ahledger.com/')));
 });
 
 test('rejects stale scans before posting', async () => {
