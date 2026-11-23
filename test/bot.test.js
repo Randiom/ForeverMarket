@@ -8,10 +8,10 @@ const { updateMessage } = require('../message');
 
 const webhook = 'https://discord.com/api/webhooks/123/token';
 const item = { id: 1, name: 'Test @everyone', url: 'https://ahledger.com/items/1-test' };
-const now = new Date().toISOString();
-const deal = { item, minBuyout: 50000, referenceMedian: 100000, discount: .5, quantity: 3, salesPerDay: 10 };
-const craft = { recipe: { name: 'Test craft', profession: 'Leatherworking', skillRequired: 225 }, result: item, cost: 50000, margin: 20000, profitPerDay: 40000, resultSalesPerDay: 10, resultClearDays: 2, unpriced: [] };
-const response = (data, status = 200) => ({ ok: status < 300, status, json: async () => data });
+const now = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+const deal = { item, minBuyout: 50000, referenceMedian: 100000, discount: .5, quantity: 3, salesPerDay: 50 };
+const craft = { recipe: { name: 'Test craft', profession: 'Leatherworking', skillRequired: 225 }, result: item, cost: 50000, margin: 20000, profitPerDay: 40000, resultSalesPerDay: 50, resultClearDays: 2, unpriced: [] };
+const response = (data, status = 200) => ({ ok: status < 300, status, json: async () => data, text: async () => data });
 async function state(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'market-test-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -62,6 +62,24 @@ test('empty boards and unavailable icons remain readable', () => {
   assert.equal(noIcons.components.flatMap(components).filter(c => c.type === 11).length, 0);
 });
 
+test('market watch is explicitly separate from validated recommendations', () => {
+  const payload = makePayload([], [], now, 'forever.pvp.horde.eu', {}, [{ name: 'Linen Cloth', minBuyout: 22, median: 30, salesPerDay: 500 }]);
+  const text = payload.components.flatMap(components).filter(c => c.type === 10).map(c => c.content).join('\n');
+  assert.match(text, /not validated buy recommendations/);
+  assert.match(text, /Min 22c · median 30c/);
+  assert.doesNotMatch(text, /% ROI/);
+});
+
+test('long source names and links stay inside message text limits', () => {
+  const long = { ...item, name: '*'.repeat(100), url: `https://ahledger.com/items/${'a'.repeat(170)}` };
+  const payload = makePayload(Array(3).fill({ ...deal, item: long, profit: 1000 }), Array(3).fill({ ...craft, result: long }), now, 'forever.pvp.horde.eu', {}, [{ name: 'Cloth', minBuyout: 50, median: 100, salesPerDay: 500 }]);
+  const all = payload.components.flatMap(components);
+  const size = all.filter(c => c.type === 10).reduce((n, c) => n + c.content.length, 0);
+  assert.ok(size <= 4000);
+  assert.ok(all.length <= 40);
+  assert.doesNotMatch(JSON.stringify(payload), /NaN/);
+});
+
 test('first run creates a board; another process reads state and edits it', async t => {
   const stateFile = await state(t);
   const calls = [];
@@ -100,13 +118,13 @@ test('fetches prices and icons, then updates the persisted board', async t => {
   const stateFile = await state(t);
   const fetcher = async (url, options) => {
     const common = { market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: now };
-    if (url.includes('/deals/')) return response({ ...common, deals: [deal] });
+    if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(now) / 1000}|1\n1:100000:50000:3:100000:100000:90000:110000:500`);
     if (url.includes('/crafting/')) return response({ ...common, recipes: url.includes('profession=Alchemy') ? [craft] : [] });
     if (url.includes('/prices/')) return response({
-      item: { id: 1 }, latest: { minBuyout: 50000, median: 120000, observedAt: now },
+      item, latest: { minBuyout: 50000, median: 120000, observedAt: now },
       series: Array.from({ length: 72 }, (_, hour) => ({ t: new Date(Date.parse(now) - hour * 3600000).toISOString(), min: 100000, median: 120000, quantity: 10 })),
     });
-    if (url.includes('/tooltip/')) return response({ items: [{ id: 1, icon: 'https://render.worldofwarcraft.com/icon.jpg' }] });
+    if (url.includes('/tooltip/')) return response({ market: { slug: 'forever/pvp/horde/eu' }, items: [{ id: 1, icon: 'https://render.worldofwarcraft.com/icon.jpg' }] });
     assert.match(options.method, /POST|PATCH/);
     return response({ id: '456' });
   };
@@ -118,9 +136,10 @@ test('fetches prices and icons, then updates the persisted board', async t => {
 
 test('stale scans never overwrite the last good board', async t => {
   const stateFile = await state(t);
-  const oldScan = new Date(Date.now() - 7 * 3600000).toISOString();
+  const oldScan = new Date(Date.parse(now) - 7 * 3600000).toISOString();
   const fetcher = async url => {
     if (url.includes('discord.com')) assert.fail('must not send stale data');
+    if (url.includes('/pricetable/')) return response(`AHL1|forever/pvp/horde/eu|${Date.parse(oldScan) / 1000}|1\n1:100000:50000:3:100000:100000:90000:110000:500`);
     return response({ market: 'forever.pvp.horde.eu', marketStatus: 'scanned', pricesAsOf: oldScan, deals: [], recipes: [] });
   };
   await assert.rejects(run({ fetcher, webhook, stateFile }), /stale/);
